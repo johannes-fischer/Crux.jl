@@ -36,6 +36,43 @@ POMDPs.value(π::LookaheadPolicy, s) = value(π.π, s)
 action_space(π::LookaheadPolicy) = action_space(π.π)
 actor(π::LookaheadPolicy) = π.π
 critic(π::LookaheadPolicy) = π.π
+
+### Sampling-based LookaheadPolicy
+
+mutable struct SampledLookaheadPolicy <: Policy
+    mdp::MDP
+    π::NetworkPolicy
+    m::Int
+end
+
+Flux.@functor SampledLookaheadPolicy (π,)
+
+function POMDPs.action(π::SampledLookaheadPolicy, svec)
+    mdp = π.mdp
+    pomdp = mdp.pomdp
+    A = POMDPTools.ordered_actions(pomdp)
+    b = convert_s(DiscreteBelief, svec, mdp)
+
+    Qvals = map(A) do a
+        R = 0.0
+        for _ in 1:π.m
+            s = rand(b)
+            o, r = @gen(:o,:r)(pomdp, s, a)
+            bp = POMDPs.update(mdp.updater, b, a, o)
+            bpvec = convert_s(Vector, bp, mdp)
+            α = value(π.π, bpvec)
+            R += 1 / π.m * (r + discount(pomdp) * dot(α, bpvec))
+        end
+        R
+    end
+    A[argmax(Qvals)]
+end
+
+POMDPs.value(π::SampledLookaheadPolicy, s) = value(π.π, s)
+action_space(π::SampledLookaheadPolicy) = action_space(π.π)
+actor(π::SampledLookaheadPolicy) = π.π
+critic(π::SampledLookaheadPolicy) = π.π
+
 ### AlphaQPolicy
 
 mutable struct AlphaQPolicy <: Policy
