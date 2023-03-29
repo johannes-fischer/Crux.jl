@@ -86,6 +86,41 @@ function td_loss(;loss=Flux.mse, name=:Qavg, s_key=:s, a_key=:a, weight=nothing)
     end
 end
 
+function td_Qloss(;loss=Flux.mse, name=:Qavg, s_key=:s, a_key=:a, weight=nothing)
+    (π, 𝒫, 𝒟, y; info=Dict()) -> begin
+        b = 𝒟[s_key]
+        @assert all(sum(b, dims=1) .≈ 1f0)
+        αQ = value(π, b, 𝒟[a_key])
+
+        # Store useful information
+        ignore_derivatives() do
+            Q = sum(dropdims(αQ, dims=2) .* b, dims=1)
+            @assert length(Q) == size(αQ)[end]
+            info[name] = mean(Q)
+        end
+
+        loss(αQ, y, agg = isnothing(weight) ? mean : weighted_mean(𝒟[weight]))
+    end
+end
+
+function td_Vloss(;loss=Flux.mse, name=:Vavg, s_key=:s, a_key=:a, weight=nothing)
+    (π, 𝒫, 𝒟, y; info=Dict()) -> begin
+        b = 𝒟[s_key]
+        @assert all(sum(b, dims=1) .≈ 1f0)
+        alpha = value(π, b)
+
+        # Store useful information
+        ignore_derivatives() do
+            V = sum(alpha .* b, dims=1)
+            @assert length(V) == size(alpha)[end]
+            info[name] = mean(V)
+        end
+
+        loss(alpha, y, agg = isnothing(weight) ? mean : weighted_mean(𝒟[weight]))
+    end
+end
+
+
 function double_Q_loss(;name1=:Q1avg, name2=:Q2avg, kwargs...)
     l1 = td_loss(;name=name1, kwargs...)
     l2 = td_loss(;name=name2, kwargs...)

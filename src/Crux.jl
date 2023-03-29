@@ -24,7 +24,8 @@ module Crux
     using Base.Iterators: partition
     using WeightsAndBiasLogger
     using Dates
-  
+    using POMDPTools
+
     extra_functions = Dict()
     function set_function(key, val)
         extra_functions[key] = val
@@ -56,6 +57,9 @@ module Crux
            entropy, logpdf, action_space, exploration, layers, actor, critic,
            LatentConditionedNetwork, StateDependentDistributionPolicy
     include("policies.jl")
+
+    export LookaheadPolicy, AlphaQPolicy
+    include("alpha_policies.jl")
 
     export Sampler, initial_observation, terminate_episode!, step!, steps!,
            episodes!, metric_by_key, metrics_by_key, undiscounted_return,
@@ -108,11 +112,12 @@ module Crux
     include("model_free/off_policy.jl")
     include("model_free/batch.jl")
 
-    export REINFORCE, A2C, PPO, LagrangePPO, DQN, DDPG, TD3, SoftQ, SAC
+    export REINFORCE, A2C, PPO, LagrangePPO, DQN, DDPG, TD3, SoftQ, SAC, AlphaDQN
     include("model_free/rl/reinforce.jl")
     include("model_free/rl/a2c.jl")
     include("model_free/rl/ppo.jl")
     include("model_free/rl/dqn.jl")
+    include("model_free/rl/alpha_dqn.jl")
     include("model_free/rl/ddpg.jl")
     include("model_free/rl/td3.jl")
     include("model_free/rl/softq.jl")
