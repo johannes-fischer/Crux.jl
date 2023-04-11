@@ -86,7 +86,18 @@ function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
         args = (a, x)
     end
 
-    if sampler.mdp isa POMDP
+    if sampler.mdp isa ExplicitBeliefMDP && haskey(data, :o)
+        pomdp_state = rand(sampler.s)
+        o, r = @gen(:o, :r)(sampler.mdp.pomdp, pomdp_state, args...; kwargs...)
+        sp = POMDPs.update(sampler.mdp.updater, sampler.s, a, o)
+        spvec = convert_s(AbstractArray, sp, sampler.mdp)
+
+        ovec = convert_o(AbstractArray, o, sampler.mdp.pomdp)
+        if size(data[:o], 1) == 0
+            data[:o] = fill(ovec[1], size(ovec)..., size(data[:s], ndims(data[:s])))
+        end
+        bslice(data[:o], j:j) .= ovec
+    elseif sampler.mdp isa POMDP
         sp, o, r = @gen(:sp,:o,:r)(sampler.mdp, sampler.s, args...; kwargs...)
         spvec = convert_o(AbstractArray, o, sampler.mdp)
     else
@@ -120,7 +131,7 @@ function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
         end
 
         if size(data[:z], 1) == 0
-            data[:z] = fill(z[1], length(z), size(data[:s], 2))
+            data[:z] = fill(z[1], length(z), size(data[:s], ndims(data[:s])))
         end
         data[:z][:, j] = z
     end

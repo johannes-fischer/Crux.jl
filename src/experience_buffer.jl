@@ -27,6 +27,8 @@ function mdp_data(S::T1, A::T2, capacity::Int, extras::Array{Symbol} = Symbol[];
             data[k] = ArrayType(fill(zero(type(A)), dim(A)..., capacity))
         elseif k in [:z] # Some latent value of unknown dimension
             data[k] = ArrayType(fill(zero(R), 0, capacity))
+        elseif k in [:o] # Observations of unknown dimension
+            data[k] = ArrayType(fill(zero(R), 0, capacity))
         else
             CRUX_WARNINGS && @error "Unrecognized key: $k"
         end
@@ -241,7 +243,7 @@ function Base.push!(b::ExperienceBuffer, data; ids = nothing)
         end
         
         # Deal with latent variable data
-        if k == :z && size(b[k], 1) == 0
+        if k in [:z, :o] && size(b[k], 1) == 0
             zdim = size(data[k], 1)
             b.data[k] = fill(zero(data[k][1]), zdim, capacity(b)) # this won't work for gpu
         end

@@ -58,7 +58,7 @@ module Crux
            LatentConditionedNetwork, StateDependentDistributionPolicy
     include("policies.jl")
 
-    export LookaheadPolicy, AlphaQPolicy
+    export LookaheadPolicy, SampledLookaheadPolicy, AlphaQPolicy
     include("alpha_policies.jl")
 
     export Sampler, initial_observation, terminate_episode!, step!, steps!,
@@ -117,7 +117,9 @@ module Crux
     include("model_free/rl/a2c.jl")
     include("model_free/rl/ppo.jl")
     include("model_free/rl/dqn.jl")
+    include("model_free/rl/alpha_dqn_util.jl")
     include("model_free/rl/alpha_dqn.jl")
+    include("model_free/rl/alpha_dvn.jl")
     include("model_free/rl/ddpg.jl")
     include("model_free/rl/td3.jl")
     include("model_free/rl/softq.jl")

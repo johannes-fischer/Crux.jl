@@ -105,7 +105,6 @@ function best_value(π::AlphaQPolicy, svec)
 end
 
 POMDPs.value(π::AlphaQPolicy, s) = value(π.π, s)
-# POMDPs.value(π::AlphaQPolicy, s, a) = value(π.π, s, a)
 function POMDPs.value(π::AlphaQPolicy, svec, a_oh)
     mdp = π.mdp
     pomdp = mdp.pomdp
