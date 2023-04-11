@@ -3,15 +3,15 @@ Base.zero(s::Type{Symbol}) = :zero # For initializing symbolic arrays
 # construction of common mdp data
 function mdp_data(S::T1, A::T2, capacity::Int, extras::Array{Symbol} = Symbol[]; ArrayType = Array, R = Float32, D = Bool, W = Float32) where {T1 <: AbstractSpace, T2 <: AbstractSpace}
     data = Dict{Symbol, ArrayType}(
-        :s => ArrayType(fill(zero(type(S)), dim(S)..., capacity)), 
-        :a => ArrayType(fill(zero(type(A)), dim(A)..., capacity)), 
-        :sp => ArrayType(fill(zero(type(S)), dim(S)..., capacity)), 
-        :r => ArrayType(fill(zero(R), 1, capacity)), 
+        :s => ArrayType(fill(zero(type(S)), dim(S)..., capacity)),
+        :a => ArrayType(fill(zero(type(A)), dim(A)..., capacity)),
+        :sp => ArrayType(fill(zero(type(S)), dim(S)..., capacity)),
+        :r => ArrayType(fill(zero(R), 1, capacity)),
         :done => ArrayType(fill(zero(D), 1, capacity)),
         :episode_end => ArrayType(fill(zero(D), 1, capacity))
         )
     for k in extras
-        if k in [:return, :logprob, :xlogprob, :advantage, :cost, :cost_advantage, 
+        if k in [:return, :logprob, :xlogprob, :advantage, :cost, :cost_advantage,
                  :cost_return, :value, :var_prob, :cvar_prob, :f]
             data[k] = ArrayType(fill(zero(R), 1, capacity))
         elseif k in [:weight, :importance_weight, :fwd_importance_weight,
@@ -50,9 +50,9 @@ end
 # PriorityParams(N::Int; kwargs...) = PriorityParams(;minsort_priorities=MinHeap(fill(Inf32, N)), priorities=FenwickTree(fill(0f0, N)), kwargs...)
 PriorityParams(N::Int; kwargs...) = PriorityParams(;priorities=fill(0f0, N), kwargs...)
 PriorityParams(N::Int, pp::PriorityParams) = PriorityParams(N, α=pp.α, β=pp.β, max_priority=pp.max_priority)
-    
+
 ## Experience Buffer stuff
-@with_kw mutable struct ExperienceBuffer{T <: AbstractArray} 
+@with_kw mutable struct ExperienceBuffer{T <: AbstractArray}
     data::Dict{Symbol, T}
     elements::Int64
     next_ind::Int64
@@ -71,10 +71,10 @@ function ExperienceBuffer(data::Dict{Symbol, T}; elements=capacity(data), next_i
     if prioritized
         update_priorities!(b, 1:elements, b.priority_params.max_priority*ones(Float32, elements))
     end
-    b    
+    b
 end
 
-function ExperienceBuffer(S::T1, A::T2, capacity::Int, extras::Array{Symbol}=Symbol[]; device=cpu, 
+function ExperienceBuffer(S::T1, A::T2, capacity::Int, extras::Array{Symbol}=Symbol[]; device=cpu,
                           prioritized=false, priority_params::NamedTuple=(;), R=Float32, D=Bool, W=Float32) where {T1 <: AbstractSpace, T2 <: AbstractSpace}
     Atype = device == gpu ? CuArray : Array
     data = mdp_data(S, A, capacity, extras, ArrayType=Atype, R=R, D=D, W=W)
@@ -103,7 +103,7 @@ function clear!(b::ExperienceBuffer)
     b.total_count = 0
     isprioritized(b) && (b.priority_params = PriorityParams(capacity(b), b.priority_params))
     b
-end 
+end
 
 function Base.hcat(buffers::ExperienceBuffer...; kwargs...)
     T(v) = v isa SubArray ? Array{typeof(v[1])} : typeof(v)
@@ -206,20 +206,20 @@ function episodes(b::ExperienceBuffer, use_done=false, episode_checker=nothing)
     else
         error("Need :episode_end flag or :t column to determine episodes")
     end
-    
+
     # make sure every index is part of an episode
     if length(b) > 0 && ep_ends[end] != length(b)
         push!(ep_starts, ep_ends[end]+1)
         push!(ep_ends, length(b))
     end
-    
+
     # If an episode checker is supplied use it to pull out those that return true
     if !isnothing(episode_checker)
         episodes = collect(zip(ep_starts, ep_ends))
         return episodes[[episode_checker(b, ep) for ep in episodes]]
     else
         zip(ep_starts, ep_ends)
-    end 
+    end
 end
 
 function get_last_N_indices(b::ExperienceBuffer, N)
@@ -241,20 +241,20 @@ function Base.push!(b::ExperienceBuffer, data; ids = nothing)
             # CRUX_WARNINGS && @warn "Pushed data does not contain $k"
             continue
         end
-        
+
         # Deal with latent variable data
         if k in [:z, :o] && size(b[k], 1) == 0
             zdim = size(data[k], 1)
             b.data[k] = fill(zero(data[k][1]), zdim, capacity(b)) # this won't work for gpu
         end
-            
+
         v1 = bslice(b.data[k], I)
         v2 = collect(bslice(data[k], ids))
         @assert size(v1)[1:end-1] == size(v2)[1:end-1]
         copyto!(v1, v2)
     end
     isprioritized(b) && update_priorities!(b, I, b.priority_params.max_priority*ones(N))
-        
+
     b.elements = min(C, b.elements + N)
     b.next_ind = mod1(b.next_ind + N, C)
     I
@@ -265,12 +265,12 @@ function push_reservoir!(buffer, data; weighted=false)
     N = capacity(data)
     for i=1:N
         element = Dict(k => bslice(v, i:i) for (k,v) in data)
-        
+
         # Only add samples according to their weight
         if weighted && haskey(element, :weight) && rand() > element[:weight][1]
             continue
         end
-        
+
         buffer.total_count += 1
         # Add the element to the buffer and return if we haven't hit our max
         if length(buffer) < capacity(buffer)
@@ -278,7 +278,7 @@ function push_reservoir!(buffer, data; weighted=false)
         else
             # Choose a random number up to count
             j = rand(1:buffer.total_count)
-            
+
             # If its within the buffer replace the element
             if j <= capacity(buffer)
                 for k in keys(buffer)
@@ -324,7 +324,7 @@ end
 
 # With guidance from https://github.com/openai/baselines/blob/master/baselines/deepq/replay_buffer.py
 function prioritized_sample!(target::ExperienceBuffer, source::ExperienceBuffer; i = 1, B = capacity(target))
-    @assert haskey(source, :weight) 
+    @assert haskey(source, :weight)
     N = length(source)
     # prs = source.priority_params.priorities
     prs = view(source.priority_params.priorities, 1:length(source))
