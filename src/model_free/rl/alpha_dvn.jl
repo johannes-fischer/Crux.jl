@@ -126,6 +126,89 @@ function alphaDVN_target_all_bao(π, 𝒫, 𝒟, γ::Float32; kwargs...)
     reduce(hcat, alphas)
 end
 
+function alphaDVN_target_generalize(π, 𝒫, 𝒟, γ::Float32; kwargs...)
+    mdp = π.mdp
+    pomdp = mdp.pomdp
+    S = POMDPTools.ordered_states(pomdp)
+    A = POMDPTools.ordered_actions(pomdp)
+    O = POMDPTools.ordered_observations(pomdp)
+    r = StateActionReward(pomdp)
+
+    alphas = map(eachcol(𝒟[:s])) do s
+        @assert length(s) == 2
+        b = convert_s(DiscreteBelief, collect(s), mdp)
+
+        not_terminals = [stateindex(pomdp, s) for s in S if !isterminal(pomdp, s)]
+        terminals = [stateindex(pomdp, s) for s in S if isterminal(pomdp, s)]
+
+        B_discretization = 100
+        Γlength = length(A) * length(O) + B_discretization
+        Γnet = Vector{Vector{Float64}}(undef, Γlength)
+        i = 1
+        for a in A
+            trans_probs = dropdims(sum([pdf(transition(pomdp, S[is], a), sp) * b.b[is] for sp in S, is in not_terminals], dims=2), dims=2)
+            if !isempty(terminals) trans_probs[terminals] .+= b.b[terminals] end
+
+            for o in O
+                # update beliefs
+                obs_probs = pdf.(map(sp -> observation(pomdp, a, sp), S), [o])
+                b′ = obs_probs .* trans_probs
+
+                if sum(b′) > 0.
+                    b′ = DiscreteBelief(pomdp, b.state_list, belief_norm(pomdp, b.b, b′, terminals, not_terminals))
+                else
+                    b′ = DiscreteBelief(pomdp, b.state_list, zeros(length(S)))
+                end
+
+                # extract optimal alpha vector at resulting belief
+                # Γao[obsindex(pomdp, o)] = _argmax(α -> dot(α,b′.b), Γ)
+                bao_vec = convert_s(Vector, b′, mdp)
+                Γnet[i] = value(π, bao_vec)
+                i += 1
+            end
+        end
+        for x in LinRange(0, 1, B_discretization)
+            @assert i<= Γlength
+            bao_vec = [x, 1-x]
+            Γnet[i] = value(π, bao_vec)
+            i += 1
+        end
+
+        Γa = Vector{Vector{Float32}}(undef, length(A))
+        for a in A
+            Γao = Vector{Vector{Float32}}(undef, length(O))
+            trans_probs = dropdims(sum([pdf(transition(pomdp, S[is], a), sp) * b.b[is] for sp in S, is in not_terminals], dims=2), dims=2)
+            if !isempty(terminals) trans_probs[terminals] .+= b.b[terminals] end
+
+            for o in O
+                # update beliefs
+                obs_probs = pdf.(map(sp -> observation(pomdp, a, sp), S), [o])
+                b′ = obs_probs .* trans_probs
+
+                if sum(b′) > 0.
+                    b′ = DiscreteBelief(pomdp, b.state_list, belief_norm(pomdp, b.b, b′, terminals, not_terminals))
+                else
+                    b′ = DiscreteBelief(pomdp, b.state_list, zeros(length(S)))
+                end
+
+                # extract optimal alpha vector at resulting belief
+                Γao[obsindex(pomdp, o)] = _argmax(α -> dot(α,b′.b), Γnet)
+            end
+
+            # construct new alpha vectors
+            Γa[actionindex(pomdp, a)] = [r(s, a) + (!isterminal(pomdp, s) ? (γ * sum(pdf(transition(pomdp, s, a), sp) * pdf(observation(pomdp, s, a, sp), o) * Γao[i][j]
+                                            for (j, sp) in enumerate(S), (i, o) in enumerate(O))) : 0.)
+                                            for s in S]
+        end
+
+        # find the optimal alpha vector
+        idx = argmax(map(αa -> αa ⋅ b.b, Γa))
+        alphavec = AlphaVec(Γa[idx], A[idx])
+        return alphavec.alpha
+    end
+    reduce(hcat, alphas)
+end
+
 function alphaDVN_sampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
     mdp = π.mdp
     pomdp = mdp.pomdp
@@ -232,9 +315,9 @@ function alphaDVN_weightedSampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
                     for _ in 1:π.m
                         sp = @gen(:sp)(pomdp, s, a)
                         w = obs_weight(pomdp, s, a, sp, o)
-                        v = w * αo[stateindex(pomdp, sp)]
+                        v = αo[stateindex(pomdp, sp)]
                         w_sum += w
-                        Γa[actionindex(pomdp, a)][stateindex(pomdp, s)] += v
+                        Γa[actionindex(pomdp, a)][stateindex(pomdp, s)] += w * v
                     end
                     Γa[actionindex(pomdp, a)][stateindex(pomdp, s)] *= γ / w_sum
                 end
@@ -272,8 +355,8 @@ function alphaDVN_modelFreeStateBackups(π, 𝒫, 𝒟, γ::Float32; kwargs...)
                 s_base[stateindex(pomdp, s)] = 1.
                 bs = convert_s(B, s_base, mdp)
                 bp = POMDPs.update(mdp.updater, bs, a, o)
-                αs = value(π, convert_s(Vector, bp, mdp))
                 bpvec = convert_s(Vector, bp, mdp)
+                αs = value(π, bpvec)
                 v = r(s, a) + (!isterminal(pomdp, s) ? (γ * dot(bpvec, αs)) : 0.)
                 α[stateindex(pomdp, s)] = v
             end
@@ -316,6 +399,46 @@ function alphaDVN_modelFreeWeightedStateBackups(π, 𝒫, 𝒟, γ::Float32; kwa
                 α[stateindex(pomdp, s)] = v
             end
             α = svec .* α + (1 .- svec) .* value(π, svec)
+            Γa[actionindex(pomdp, a)] = α
+        end
+
+        # find the optimal alpha vector
+        idx = argmax(map(αa -> αa ⋅ b.b, Γa))
+        alphavec = AlphaVec(Γa[idx], A[idx])
+        return alphavec.alpha
+    end
+    reduce(hcat, alphas)
+end
+
+function alphaDVN_modelFreeTrueStateBackups(π, 𝒫, 𝒟, γ::Float32; kwargs...)
+    mdp = π.mdp
+    pomdp = mdp.pomdp
+    S = POMDPTools.ordered_states(pomdp)
+    A = POMDPTools.ordered_actions(pomdp)
+    r = StateActionReward(pomdp)
+
+    alphas = map(zip(eachcol(𝒟[:s]), eachcol(𝒟[:s_pomdp]), eachcol(𝒟[:o]))) do (svec, s_pomdp_vec, ovec)
+        @assert length(svec) == 2
+        B = statetype(mdp)
+        b = convert_s(B, collect(svec), mdp)
+        o = convert_o(obstype(pomdp), collect(ovec), mdp.pomdp)
+
+        Γa = Vector{Vector{Float32}}(undef, length(A))
+        for a in A
+            # construct new alpha vectors
+            α = value(π, svec)
+
+            s = convert_s(statetype(pomdp), collect(s_pomdp_vec), pomdp)
+
+            s_base = zeros(length(S))
+            s_base[stateindex(pomdp, s)] = 1.
+            bs = convert_s(B, s_base, mdp)
+
+            bp = POMDPs.update(mdp.updater, bs, a, o)
+            bpvec = convert_s(Vector, bp, mdp)
+            αs = value(π, bpvec)
+            v = r(s, a) + (!isterminal(pomdp, s) ? (γ * dot(bpvec, αs)) : 0.)
+            α[stateindex(pomdp, s)] = v
             Γa[actionindex(pomdp, a)] = α
         end
 
