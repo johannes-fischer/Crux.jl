@@ -32,6 +32,7 @@ function POMDPs.action(π::LookaheadPolicy, svec)
     A[argmax(Qvals)]
 end
 
+best_value(π::LookaheadPolicy, s) = value(π, s)
 POMDPs.value(π::LookaheadPolicy, s) = value(π.π, s)
 action_space(π::LookaheadPolicy) = action_space(π.π)
 actor(π::LookaheadPolicy) = π.π
@@ -68,6 +69,7 @@ function POMDPs.action(π::SampledLookaheadPolicy, svec)
     A[argmax(Qvals)]
 end
 
+best_value(π::SampledLookaheadPolicy, s) = value(π, s)
 POMDPs.value(π::SampledLookaheadPolicy, s) = value(π.π, s)
 action_space(π::SampledLookaheadPolicy) = action_space(π.π)
 actor(π::SampledLookaheadPolicy) = π.π
@@ -78,7 +80,9 @@ critic(π::SampledLookaheadPolicy) = π.π
 mutable struct AlphaQPolicy <: Policy
     mdp::MDP
     π::NetworkPolicy
+    m::Int
 end
+AlphaQPolicy(mdp, π) = AlphaQPolicy(mdp, π, 0)
 
 Flux.@functor AlphaQPolicy (π,)
 
