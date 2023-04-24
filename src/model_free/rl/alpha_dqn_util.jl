@@ -35,7 +35,7 @@ function AlphaDQN(;π::Crux.Policy,
     kwargs...)
 
     OffPolicySolver(;agent=PolicyParams(π=π, π_explore=π_explore, π⁻=deepcopy(π)),
-            log=LoggerParams(;dir="log/dqn", log...),
+            log=LoggerParams(;dir="log/adqn", log...),
             N=N,
             ΔN=ΔN,
             c_opt = TrainingParams(;loss=c_loss, name=string(prefix, "critic_"), epochs=ΔN, c_opt...),
