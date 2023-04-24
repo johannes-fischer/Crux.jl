@@ -87,8 +87,8 @@ function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
     end
 
     if sampler.mdp isa ExplicitBeliefMDP && haskey(data, :o)
-        pomdp_state = rand(sampler.s)
-        o, r = @gen(:o, :r)(sampler.mdp.pomdp, pomdp_state, args...; kwargs...)
+        s_pomdp = rand(sampler.s)
+        sp_pomdp, o, r = @gen(:sp, :o, :r)(sampler.mdp.pomdp, s_pomdp, args...; kwargs...)
         sp = POMDPs.update(sampler.mdp.updater, sampler.s, a, o)
         spvec = convert_s(AbstractArray, sp, sampler.mdp)
 
@@ -97,6 +97,21 @@ function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
             data[:o] = fill(ovec[1], size(ovec)..., size(data[:s], ndims(data[:s])))
         end
         bslice(data[:o], j:j) .= ovec
+
+        if haskey(data, :s_pomdp)
+            s_pomdp_vec = convert_s(AbstractArray, s_pomdp, sampler.mdp.pomdp)
+            if size(data[:s_pomdp], 1) == 0
+                data[:s_pomdp] = fill(s_pomdp_vec[1], size(s_pomdp_vec)..., size(data[:s], ndims(data[:s])))
+            end
+            bslice(data[:s_pomdp], j:j) .= s_pomdp_vec
+        end
+        if haskey(data, :sp_pomdp)
+            sp_pomdp_vec = convert_s(AbstractArray, sp_pomdp, sampler.mdp.pomdp)
+            if size(data[:sp_pomdp], 1) == 0
+                data[:sp_pomdp] = fill(sp_pomdp_vec[1], size(sp_pomdp_vec)..., size(data[:s], ndims(data[:s])))
+            end
+            bslice(data[:sp_pomdp], j:j) .= sp_pomdp_vec
+        end
     elseif sampler.mdp isa POMDP
         sp, o, r = @gen(:sp,:o,:r)(sampler.mdp, sampler.s, args...; kwargs...)
         spvec = convert_o(AbstractArray, o, sampler.mdp)

@@ -40,7 +40,7 @@ function AlphaDQN(;π::Crux.Policy,
             ΔN=ΔN,
             c_opt = TrainingParams(;loss=c_loss, name=string(prefix, "critic_"), epochs=ΔN, c_opt...),
             target_fn=target_fn,
-            required_columns = [:o],
+            required_columns = [:o, :s_pomdp, :sp_pomdp],
             kwargs...)
 end
 
