@@ -217,6 +217,7 @@ function alphaDQN_weightedSampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
     O = POMDPTools.ordered_observations(pomdp)
     r = StateActionReward(pomdp)
     ns = length(S)
+    na = length(A)
 
     alphas = map(zip(eachcol(𝒟[:s]), eachcol(𝒟[:a]), eachcol(𝒟[:o]), eachcol(𝒟[:sp]))) do (b_vec, a_oh, ovec, bp_vec)
         o = convert_o(obstype(pomdp), collect(ovec), mdp.pomdp)
@@ -225,14 +226,14 @@ function alphaDQN_weightedSampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
 
         # extract optimal alpha vector at resulting belief
         αQ = reshape(value(π.π, bp_vec), (ns, na))
-        idx = argmax(map(αa -> αa ⋅ bao_vec, eachcol(αQ)))
+        idx = argmax(map(αa -> αa ⋅ bp_vec, eachcol(αQ)))
         αo = αQ[:, idx]
 
         # construct new alpha vectors
-        α = zeros(length(S))
+        α = zeros(Float32, length(S))
         for s in S
-            weights = Vector{Float64}(undef, π.m)
-            values = Vector{Float64}(undef, π.m)
+            weights = Vector{Float32}(undef, π.m)
+            values = Vector{Float32}(undef, π.m)
             α[stateindex(pomdp, s)] = r(s, a)
             if !isterminal(pomdp, s)
                 for i in 1:π.m
@@ -245,7 +246,52 @@ function alphaDQN_weightedSampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
         end
         return α
     end
-    reduce(hcat, alphas)
+    res = reduce(hcat, alphas)
+    reshape(res, (length(S), 1, length(alphas)))
+end
+
+function alphaDQN_oneStateWeightedSampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
+    mdp = π.mdp
+    pomdp = mdp.pomdp
+    S = POMDPTools.ordered_states(pomdp)
+    A = POMDPTools.ordered_actions(pomdp)
+    O = POMDPTools.ordered_observations(pomdp)
+    B = statetype(mdp)
+    r = StateActionReward(pomdp)
+    ns = length(S)
+    na = length(A)
+
+    alphas = map(zip(eachcol(𝒟[:s]), eachcol(𝒟[:a]), eachcol(𝒟[:o]), eachcol(𝒟[:sp]))) do (b_vec, a_oh, ovec, bp_vec)
+        b = convert_s(B, collect(b_vec), mdp)
+        o = convert_o(obstype(pomdp), collect(ovec), mdp.pomdp)
+
+        a = A[argmax(a_oh)]
+
+        # construct new alpha vectors
+        α = value(π, b_vec, a_oh)
+
+        s = rand(b)
+
+        # extract optimal alpha vector at resulting belief
+        αQ = reshape(value(π.π, bp_vec), (ns, na))
+        idx = argmax(map(αa -> αa ⋅ bp_vec, eachcol(αQ)))
+        αo = αQ[:, idx]
+
+        weights = Vector{Float32}(undef, π.m)
+        values = Vector{Float32}(undef, π.m)
+        α[stateindex(pomdp, s)] = r(s, a)
+        if !isterminal(pomdp, s)
+            for i in 1:π.m
+                sp = @gen(:sp)(pomdp, s, a)
+                weights[i] = obs_weight(pomdp, s, a, sp, o)
+                values[i] = αo[stateindex(pomdp, sp)]
+            end
+            α[stateindex(pomdp, s)] += γ * dot(weights, values) / sum(weights)
+        end
+        return α
+    end
+    res = reduce(hcat, alphas)
+    reshape(res, (length(S), 1, length(alphas)))
 end
 
 function alphaDQN_weightedSampleTargetAllBelief(π, 𝒫, 𝒟, γ::Float32; kwargs...)
@@ -275,7 +321,7 @@ function alphaDQN_weightedSampleTargetAllBelief(π, 𝒫, 𝒟, γ::Float32; kwa
 
         a = A[argmax(a_oh)]
 
-        bpvec = collect(spvec)
+        bpvec = collect(bp_vec)
         α_all = _argmax(α -> dot(α, bpvec), Γnet)
 
         # extract optimal alpha vector at resulting belief
@@ -287,10 +333,10 @@ function alphaDQN_weightedSampleTargetAllBelief(π, 𝒫, 𝒟, γ::Float32; kwa
         end
 
         # construct new alpha vectors
-        α = zeros(length(S))
+        α = zeros(Float32, length(S))
         for s in S
-            weights = Vector{Float64}(undef, π.m)
-            values = Vector{Float64}(undef, π.m)
+            weights = Vector{Float32}(undef, π.m)
+            values = Vector{Float32}(undef, π.m)
             α[stateindex(pomdp, s)] = r(s, a)
             if !isterminal(pomdp, s)
                 for i in 1:π.m
@@ -303,7 +349,8 @@ function alphaDQN_weightedSampleTargetAllBelief(π, 𝒫, 𝒟, γ::Float32; kwa
         end
         return α
     end
-    reduce(hcat, alphas)
+    res = reduce(hcat, alphas)
+    reshape(res, (length(S), 1, length(alphas)))
 end
 
 function alphaDQN_singleSampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
@@ -341,33 +388,76 @@ function alphaDQN_singleSampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
     reshape(res, (length(S), 1, length(alphas)))
 end
 
-function alphaDQN_weightedSampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
+function alphaDQN_blindSingleSampleTarget(π, 𝒫, 𝒟, γ::Float32; kwargs...)
     mdp = π.mdp
     pomdp = mdp.pomdp
     S = POMDPTools.ordered_states(pomdp)
     A = POMDPTools.ordered_actions(pomdp)
     B = statetype(mdp)
-    r = StateActionReward(pomdp)
+    # r = StateActionReward(pomdp)
     ns = length(S)
     na = length(A)
 
-    alphas = map(zip(eachcol(𝒟[:s]), eachcol(𝒟[:s_pomdp]), eachcol(𝒟[:a]), eachcol(𝒟[:o]), eachcol(𝒟[:sp]), eachcol(𝒟[:sp_pomdp]), 𝒟[:r])) do (svec, s_pomdp_vec, a_oh, ovec, spvec, sp_pomdp_vec, r)
-        b = convert_s(B, collect(svec), mdp)
+    alphas = map(zip(eachcol(𝒟[:s]), eachcol(𝒟[:a]), eachcol(𝒟[:sp]))) do (bvec, a_oh, bpvec)
+        b = convert_s(B, collect(bvec), mdp)
 
         a = A[argmax(a_oh)]
 
         # construct new alpha vectors
-        α = value(π, svec, a_oh)
+        α = value(π, bvec, a_oh)
 
         s = rand(b)
-        sp, o, r = @gen(:sp,:o,:r)(pomdp, s, a)
+        sp, r = @gen(:sp, :r)(pomdp, s, a)
 
-        bp = POMDPs.update(mdp.updater, b, a, o)
-        bpvec = convert_s(Vector, bp, mdp)
+        # bp = POMDPs.update(mdp.updater, b, a, o)
+        # bpvec = convert_s(Vector, bp, mdp)
 
         αQ = reshape(value(π.π, bpvec), (ns, na))
         idx = argmax(map(αa -> αa ⋅ bpvec, eachcol(αQ)))
         αo = αQ[:, idx]
+        v = r + (!isterminal(pomdp, s) ? (γ * αo[stateindex(pomdp, sp)]) : 0.)
+        α[stateindex(pomdp, s)] = v
+        α
+    end
+    res = reduce(hcat, alphas)
+    reshape(res, (length(S), 1, length(alphas)))
+end
+
+function alphaDQN_blindSingleSampleTargetAllBelief(π, 𝒫, 𝒟, γ::Float32; kwargs...)
+    mdp = π.mdp
+    pomdp = mdp.pomdp
+    S = POMDPTools.ordered_states(pomdp)
+    A = POMDPTools.ordered_actions(pomdp)
+    B = statetype(mdp)
+    # r = StateActionReward(pomdp)
+    ns = length(S)
+    na = length(A)
+
+    B_discretization = 100
+    na = length(A)
+    Γlength = na * B_discretization
+    Γnet = Vector{Vector{Float64}}(undef, Γlength)
+    i=1
+    for x in LinRange(0, 1, B_discretization)
+        @assert i <= Γlength
+        bao_vec = [x, 1-x]
+        αQ = reshape(value(π.π, bao_vec), (ns, na))
+        Γnet[i:i+na-1] = collect(eachcol(αQ))
+        i += na
+    end
+
+    alphas = map(zip(eachcol(𝒟[:s]), eachcol(𝒟[:a]), eachcol(𝒟[:sp]))) do (bvec, a_oh, bpvec)
+        b = convert_s(B, collect(bvec), mdp)
+
+        a = A[argmax(a_oh)]
+
+        # construct new alpha vectors
+        α = value(π, bvec, a_oh)
+
+        s = rand(b)
+        sp, r = @gen(:sp, :r)(pomdp, s, a)
+
+        αo = _argmax(α -> dot(α, bpvec), Γnet)
         v = r + (!isterminal(pomdp, s) ? (γ * αo[stateindex(pomdp, sp)]) : 0.)
         α[stateindex(pomdp, s)] = v
         α
