@@ -66,10 +66,10 @@ module Crux
            discounted_return, failure, fill_gae!, fill_returns!, trim!
     include("sampler.jl")
 
-    export elapsed, LoggerParams, aggregate_info, log_performance,
+    export elapsed, LoggerParams, logdir, aggregate_info, log_performance,
            log_discounted_return, log_undiscounted_return, log_failure,
            log_exploration, log_metric_by_key, log_metrics_by_key, log_validation_error,
-           log_episode_averages, log_experience_sums, save_gif
+           log_episode_averages, log_experience_sums, log_episode_lengths, save_gif
     include("logging.jl")
 
     export smooth, readtb, tb2dict, plot_learning, episode_frames, gif, percentile,

@@ -21,27 +21,30 @@ end
     sampler::Union{Sampler, Nothing, Vector} = nothing
 end
 
+logdir(log::LoggerParams) = logdir(log.logger)
+logdir(log::TBLogger) = log.logdir
+
 Base.log(p::Nothing, i, data...; kwargs...)  = nothing
 
 #Note that i can be an int or a unitrange
 function Base.log(p::LoggerParams, i::Union{Int, UnitRange}, data...; 𝒮=nothing)
-    
+
     # Write things to disc
     for (period, fn) in p.writeout
         elapsed(i, period) && fn(i=i[end], s=p.sampler, dir=p.dir, logger=p.logger)
     end
-    
+
     # Save other run information
     !elapsed(i, p.period) && return
     i = i[end]
     p.verbose && print("Step: $i")
 	dicts = Any[p.fns..., data...]
-	
+
 	if !isnothing(p.sampler)
     	π_explore = (p.sampler isa Vector) ?  first(p.sampler).agent.π_explore : p.sampler.agent.π_explore
 		push!(dicts, log_exploration(π_explore))
 	end
-        
+
     for dict in dicts
         d = dict isa Function ? dict(s=p.sampler, i=i, 𝒮=𝒮) : dict
         for (k,v) in d
@@ -53,7 +56,7 @@ function Base.log(p::LoggerParams, i::Union{Int, UnitRange}, data...; 𝒮=nothi
 end
 # @printf("%5d / %5d eps %0.3f |  avgR %1.3f | Loss %2.3e | Grad %2.3e | EvalR %1.3f \n",
                         #t, solver.max_steps, nt[1], avg100_reward, loss_val, grad_val, scores_eval)
-                        
+
 function aggregate_info(infos)
     res = Dict()
     for k in unique(vcat([collect(keys(info)) for info in infos]...))
@@ -107,6 +110,18 @@ function log_episode_averages(keys, period)
     end
 end
 
+function log_episode_lengths(period)
+    (;𝒮, kwargs...) -> begin
+        d = Dict()
+        if hasproperty(𝒮, :buffer)
+            indices = get_last_N_indices(𝒮.buffer, period)
+            avg_val = period / sum(𝒮.buffer[:episode_end][indices])
+            d[Symbol(string("avg_length"))] = avg_val
+        end
+        d
+    end
+end
+
 function log_experience_sums(keys, period)
     (;𝒮, kwargs...) -> begin
         d = Dict()
@@ -114,7 +129,7 @@ function log_experience_sums(keys, period)
             indices = get_last_N_indices(𝒮.buffer, period)
             for k in keys
                 avg_val = sum(𝒮.buffer[k][indices])
-                d[Symbol(string("avg_", k))] = avg_val #TODO: Switch back to sum!
+                d[Symbol(string("sum_", k))] = avg_val #TODO: Switch back to sum!
             end
         end
         d
@@ -128,7 +143,7 @@ function save_gif(;base_name="demo", log_at_zero=false, log_wandb=true, append_r
         filename = string(dir,"/", pref, base_name, "_$i.gif")
         @info "writing gif to $filename"
         Crux.gif(s.mdp, s.agent.π, filename; kwargs...)
-        
+
         if log_wandb && logger isa WBLogger
             vid = wandb.Video(filename, format="gif")
             wandb.log(Dict("gif"=>vid))
