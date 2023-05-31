@@ -86,7 +86,7 @@ function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
         args = (a, x)
     end
 
-    if sampler.mdp isa ExplicitBeliefMDP && haskey(data, :o)
+    if sampler.mdp isa Union{ExplicitBeliefMDP, GenerativeBeliefMDP} && haskey(data, :o)
         s_pomdp = rand(sampler.s)
         sp_pomdp, o, r = @gen(:sp, :o, :r)(sampler.mdp.pomdp, s_pomdp, args...; kwargs...)
         sp = POMDPs.update(sampler.mdp.updater, sampler.s, a, o)
