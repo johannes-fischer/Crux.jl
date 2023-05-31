@@ -107,11 +107,11 @@ Flux.trainable(π::DiscreteNetwork) = Flux.trainable(π.network)
 
 layers(π::DiscreteNetwork) = π.network.layers
 
-POMDPs.value(π::DiscreteNetwork, s) = mdcall(π.network, s, π.device)
+POMDPs.value(π::DiscreteNetwork, s::AbstractArray) = mdcall(π.network, s, π.device)
 
 POMDPs.value(π::DiscreteNetwork, s, a_oh) = sum(value(π, s) .* a_oh, dims=1)
 
-POMDPs.action(π::DiscreteNetwork, s) = π.always_stochastic ? exploration(π, s)[1] : π.outputs[mapslices(argmax, value(π, s), dims=1)]
+POMDPs.action(π::DiscreteNetwork, s::AbstractArray) = π.always_stochastic ? exploration(π, s)[1] : π.outputs[mapslices(argmax, value(π, s), dims=1)]
 
 function Flux.onehotbatch(π::DiscreteNetwork, a)
     ignore_derivatives() do
