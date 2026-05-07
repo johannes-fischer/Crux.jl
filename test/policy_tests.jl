@@ -47,7 +47,7 @@ p_gpu = p |> gpu
 USE_CUDA && @test Crux.device(p_gpu) == gpu
 @test p_gpu.output_dim == 4
 
-@test length(Flux.params(p)) == 4
+@test length(Flux.trainables(p)) == 4
 @test length(layers(p)) == 2
 
 s0 = rand(2)
@@ -80,7 +80,7 @@ p_gpu = p |> gpu
 USE_CUDA && @test Crux.device(p_gpu) == gpu
 @test p_gpu.outputs == [1,2,3,4]
 
-@test length(Flux.params(p)) == 4
+@test length(Flux.trainables(p)) == 4
 @test length(layers(p)) == 2
 
 s0 = rand(2)
@@ -134,7 +134,12 @@ s = rand(2,100)
 a = rand([true, false], 3, 100)
 
 
-@test length(Flux.trainable(p)) == 3
+# Flux 0.16 port: `Flux.trainable(p)` returns the top-level NamedTuple of
+# trainable fields declared via `@layer trainable=(...)`. For MixtureNetwork
+# that's `(networks, weights)` — 2 entries. The line below counts the fully
+# flattened list of trainable arrays (9 = 2 nets × 4 Dense layers + 1 weight
+# ConstantLayer.vec).
+@test length(Flux.trainable(p)) == 2
 @test length(layers(p)) == 5
 @test Crux.device(p) == cpu
 
@@ -144,7 +149,7 @@ p_gpu = p |> gpu
 USE_CUDA && @test Crux.device(p_gpu) == gpu
 USE_CUDA && @test all([Crux.device(n)== gpu for n in p_gpu.networks])
 
-@test length(Flux.params(p)) == 9
+@test length(Flux.trainables(p)) == 9
 @test length(layers(p)) == 5
 
 # @test all(Crux.value(p, s) .≈ Crux.value(p_gpu, s))
@@ -170,7 +175,7 @@ USE_CUDA && @test Crux.device(p_gpu) == gpu
 USE_CUDA && @test Crux.device(p_gpu.N1) == gpu
 USE_CUDA && @test Crux.device(p_gpu.N2) == gpu
 
-@test length(Flux.params(p)) == 8
+@test length(Flux.trainables(p)) == 8
 @test length(layers(p)) == 4
 
 @test all(value(p, s) .≈ value(p_gpu, s))
@@ -206,7 +211,7 @@ USE_CUDA && @test Crux.device(p_gpu) == gpu
 USE_CUDA && @test Crux.device(p_gpu.A) == gpu
 USE_CUDA && @test Crux.device(p_gpu.C) == gpu
 
-@test length(Flux.params(p)) == 8
+@test length(Flux.trainables(p)) == 8
 @test length(layers(p)) == 4
 
 sfull = rand(6, 100)
@@ -246,7 +251,7 @@ USE_CUDA && @test Crux.device(p_gpu.μ) == gpu
 USE_CUDA && @test Crux.device(p_gpu.logΣ) == gpu
 @test all(value(p.logΣ, rand(2)) .== 1)
 
-@test length(Flux.params(p)) == 5
+@test length(Flux.trainables(p)) == 5
 @test length(layers(p)) == 3
 
 s0 = rand(2)
@@ -292,7 +297,7 @@ USE_CUDA && @test Crux.device(p_gpu) == gpu
 USE_CUDA && @test Crux.device(p_gpu.μ) == gpu
 USE_CUDA && @test Crux.device(p_gpu.logΣ) == gpu
 
-@test length(Flux.params(p)) == 6
+@test length(Flux.trainables(p)) == 6
 @test length(layers(p))  == 3
 
 
@@ -336,7 +341,12 @@ ps = [cmv, cuv, duv, doc]
 
 @test all(Crux.device.(ps) .== cpu)
 
-@test all(length.(Flux.params.(ps)) .== 0)
+# Flux 0.16 port: the old test asserted `Flux.params(p) == 0` for these
+# distribution-wrapper policies. Under explicit-tree Functors, `Flux.trainables`
+# now walks *into* `Distributions.Normal` etc. and surfaces their μ, Σ arrays
+# — that's a Functors-side detail, not a Crux contract. The semantic check we
+# actually want is "no neural-network layers to train", which `layers(p)`
+# already encodes for these policies.
 @test all(length.(layers.(ps)) .== 0)
 
 s0 = rand(2)

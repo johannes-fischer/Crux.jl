@@ -21,8 +21,18 @@ end
 DDPG actor loss function.
 
 `∇_θᵘ 𝐽 ≈ 1/𝑁 Σᵢ ∇ₐQ(s, a | θᶜ)|ₛ₌ₛᵢ, ₐ₌ᵤ₍ₛᵢ₎ ∇_θᵘ μ(s | θᵘ)|ₛᵢ`
+
+Flux 0.16 port: `m` is the differentiated actor; `π_loss` is the full
+ActorCritic so we can backprop ∂Q/∂a through the (frozen) critic. We wrap
+π_loss in `ignore_derivatives` because Zygote 0.7 otherwise tries to propagate
+gradients into both `π_loss.A` (the closed-over copy of the actor) and `m`
+(the differentiated arg) — they alias the same object on the heap, and the
+internal `accum(::Ref, ::Ref)` assertion fails.
 """
-ddpg_actor_loss(π, 𝒫, 𝒟; info=Dict()) = -mean(value(π, 𝒟[:s], action(π, 𝒟[:s])))
+function ddpg_actor_loss(m, 𝒫, 𝒟; info=Dict(), π_loss=m)
+    π_frozen = ignore_derivatives(π_loss)
+    -mean(value(π_frozen, 𝒟[:s], action(m, 𝒟[:s])))
+end
 
 
 """

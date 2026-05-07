@@ -5,7 +5,7 @@ struct SirenDense
     ω0
 end
 
-Flux.@functor SirenDense
+Flux.@layer SirenDense trainable=(weight, bias)
 
 function SirenDense(din, dout; c=6, ω0=1, isfirst=false)
     w_std = isfirst ? (1 / din) : (sqrt(c / din) / ω0)
@@ -25,7 +25,7 @@ struct ModulatedSiren
     modulator
 end
 
-Flux.trainable(π::ModulatedSiren) = (Flux.trainable(π.sirens)..., Flux.trainable(π.modulator)...)
+Flux.@layer ModulatedSiren trainable=(sirens, modulator)
 
 function (a::ModulatedSiren)(x, z)
     slayers = layers(a.sirens)

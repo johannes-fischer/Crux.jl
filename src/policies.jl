@@ -45,23 +45,32 @@ end
 
 layers(π::Chain) = π.layers
 
+# --- Flux 0.16 port: polyak / param-copy via Functors-based tree walking ---
+# Old code used `Flux.params(...).order.data`, which is the implicit-params
+# internal of Flux ≤ 0.14 and is gone in 0.16. We walk both trees with
+# `Functors.fmap` and copy any AbstractFloat array leaves.
 function polyak_average!(to, from, τ=1.0f0)
-    to_data = Flux.params(to).order.data
-    from_data, from_device = Flux.params(from).order.data, device(from)
-    device_match = from_device == device(to)
-    for i = 1:length(to_data)
-        if device_match
-            copyto!(to_data[i], τ .* from_data[i] .+ (1.0f0 - τ) .* to_data[i])
-        else
-            copyto!(to_data[i], τ .* from_data[i] .+ (1.0f0 - τ) .* from_device(to_data[i]))
+    Flux.fmap(to, from) do tx, fx
+        if tx isa AbstractArray{<:AbstractFloat} && fx isa AbstractArray{<:AbstractFloat}
+            if device(from) == device(to)
+                copyto!(tx, τ .* fx .+ (1.0f0 - τ) .* tx)
+            else
+                copyto!(tx, τ .* fx .+ (1.0f0 - τ) .* (device(from)(tx)))
+            end
         end
+        tx
     end
+    return to
 end
 
 function Base.copyto!(to, from)
-    for i = 1:length(Flux.params(to).order.data)
-        copyto!(Flux.params(to).order.data[i], Flux.params(from).order.data[i])
+    Flux.fmap(to, from) do tx, fx
+        if tx isa AbstractArray{<:AbstractFloat} && fx isa AbstractArray{<:AbstractFloat}
+            copyto!(tx, fx)
+        end
+        tx
     end
+    return to
 end
 
 ## Network for representing continous functions (value or policy)
@@ -83,9 +92,9 @@ mutable struct ContinuousNetwork <: NetworkPolicy
     end
 end
 
-Flux.@functor ContinuousNetwork
-
-Flux.trainable(π::ContinuousNetwork) = Flux.trainable(π.network)
+# Flux 0.16 port: declare trainable fields directly on @layer so opt_state
+# (Flux.setup) and the gradient tree (Flux.gradient) agree on shape.
+Flux.@layer ContinuousNetwork trainable=(network,)
 
 layers(π::ContinuousNetwork) = π.network.layers
 
@@ -111,9 +120,7 @@ mutable struct DiscreteNetwork <: NetworkPolicy
     DiscreteNetwork(network, outputs, logit_conversion, always_stochastic, dev) = new(network, cpu(outputs), logit_conversion, always_stochastic, device(network))
 end
 
-Flux.@functor DiscreteNetwork
-
-Flux.trainable(π::DiscreteNetwork) = Flux.trainable(π.network)
+Flux.@layer DiscreteNetwork trainable=(network,)
 
 layers(π::DiscreteNetwork) = π.network.layers
 
@@ -164,9 +171,7 @@ mutable struct DoubleNetwork{T1,T2} <: NetworkPolicy
     N2::T2
 end
 
-Flux.@functor DoubleNetwork
-
-Flux.trainable(π::DoubleNetwork) = (Flux.trainable(π.N1)..., Flux.trainable(π.N2)...)
+Flux.@layer DoubleNetwork trainable=(N1, N2)
 
 layers(π::DoubleNetwork) = unique((layers(π.N1)..., layers(π.N2)...))
 
@@ -195,9 +200,7 @@ mutable struct MixtureNetwork <: NetworkPolicy
 
 end
 
-Flux.@functor MixtureNetwork
-
-Flux.trainable(π::MixtureNetwork) = (Iterators.flatten([Flux.trainable(n) for n in π.networks])..., Flux.trainable(π.weights)...)
+Flux.@layer MixtureNetwork trainable=(networks, weights)
 
 layers(π::MixtureNetwork) = unique((Iterators.flatten([layers(n) for n in π.networks])..., layers(π.weights)...))
 
@@ -248,9 +251,7 @@ mutable struct ActorCritic{TA,TC} <: NetworkPolicy
     C::TC # critic
 end
 
-Flux.@functor ActorCritic
-
-Flux.trainable(π::ActorCritic) = (Flux.trainable(π.A)..., Flux.trainable(π.C)...)
+Flux.@layer ActorCritic trainable=(A, C)
 
 layers(π::ActorCritic) = unique((layers(π.A)..., layers(π.C)...))
 
@@ -290,9 +291,7 @@ end
 
 device(π::LatentConditionedNetwork) = device(π.policy)
 
-Flux.@functor LatentConditionedNetwork
-
-Flux.trainable(π::LatentConditionedNetwork) = Flux.trainable(π.policy)
+Flux.@layer LatentConditionedNetwork trainable=(policy,)
 
 layers(π::LatentConditionedNetwork) = layers(π.policy)
 
@@ -320,9 +319,7 @@ mutable struct GaussianPolicy <: NetworkPolicy
     GaussianPolicy(μ::ContinuousNetwork, logΣ::AbstractArray, always_stochastic=false) = new(μ, ContinuousNetwork(Chain(ConstantLayer(logΣ)), length(logΣ)), always_stochastic)
 end
 
-Flux.@functor GaussianPolicy
-
-Flux.trainable(π::GaussianPolicy) = (Flux.trainable(π.μ)..., Flux.trainable(π.logΣ)...)
+Flux.@layer GaussianPolicy trainable=(μ, logΣ)
 
 layers(π::GaussianPolicy) = (layers(π.μ)..., layers(π.logΣ))
 
@@ -361,9 +358,7 @@ mutable struct SquashedGaussianPolicy <: NetworkPolicy
     SquashedGaussianPolicy(μ, logΣ::Array, ascale=1.0f0, always_stochastic=false) = new(μ, ContinuousNetwork(Chain(ConstantLayer(logΣ)), length(logΣ)), ascale, always_stochastic)
 end
 
-Flux.@functor SquashedGaussianPolicy
-
-Flux.trainable(π::SquashedGaussianPolicy) = (Flux.trainable(π.μ)..., Flux.trainable(π.logΣ)...)
+Flux.@layer SquashedGaussianPolicy trainable=(μ, logΣ)
 
 layers(π::SquashedGaussianPolicy) = unique((layers(π.μ)..., layers(π.logΣ)...))
 

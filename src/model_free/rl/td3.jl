@@ -8,8 +8,16 @@ end
 
 """
 TD3 actor loss function.
+
+Flux 0.16 port: `m` is the differentiated actor; `π_loss` is the full
+ActorCritic and gives access to the (frozen) twin critics. We wrap π_loss in
+`ignore_derivatives` for the same reason as DDPG (see `ddpg_actor_loss`):
+without it Zygote tries to track gradients into both `π_loss.A` and `m`.
 """
-td3_actor_loss(π, 𝒫, 𝒟; info = Dict()) = -mean(value(π.C.N1, 𝒟[:s], action(π, 𝒟[:s])))
+function td3_actor_loss(m, 𝒫, 𝒟; info = Dict(), π_loss=m)
+    π_frozen = ignore_derivatives(π_loss)
+    -mean(value(π_frozen.C.N1, 𝒟[:s], action(m, 𝒟[:s])))
+end
 
 """
 Twin Delayed DDPG (TD3) solver.

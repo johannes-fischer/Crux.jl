@@ -1,13 +1,16 @@
 """
 PPO loss function.
+
+Flux 0.16 port: takes the differentiated model `m` (the actor) as its first
+argument so it composes directly with `Flux.withgradient(m -> …, model)`.
 """
-function ppo_loss(π, 𝒫, 𝒟; info = Dict())
-    new_probs = logpdf(π, 𝒟[:s], 𝒟[:a])
+function ppo_loss(m, 𝒫, 𝒟; info = Dict())
+    new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
     r = exp.(new_probs .- 𝒟[:logprob])
 
     A = 𝒟[:advantage]
     p_loss = -mean(min.(r .* A, clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* A))
-    e_loss = -mean(entropy(π, 𝒟[:s]))
+    e_loss = -mean(entropy(m, 𝒟[:s]))
 
     # Log useful information
     ignore_derivatives() do
@@ -57,7 +60,7 @@ function PPO(;
                     𝒫=(ϵ=ϵ, λp=λp, λe=λe),
                     log = LoggerParams(;dir = "log/ppo", log...),
                     a_opt = TrainingParams(;loss = ppo_loss, early_stopping = (infos) -> (infos[end][:kl] > target_kl), name = "actor_", a_opt...),
-                    c_opt = TrainingParams(;loss = (π, 𝒫, D; kwargs...) -> Flux.mse(value(π, D[:s]), D[:return]), name = "critic_", c_opt...),
+                    c_opt = TrainingParams(;loss = (m, 𝒫, D; kwargs...) -> Flux.mse(value(m, D[:s]), D[:return]), name = "critic_", c_opt...),
                     post_batch_callback = (𝒟; kwargs...) -> (𝒟[:advantage] .= whiten(𝒟[:advantage])),
                     required_columns = unique([required_columns..., :return, :logprob, :advantage]),
                     post_sample_callback=record_avgr,
@@ -65,15 +68,17 @@ function PPO(;
 end
 
 """
-PPO loss with a penalty.
+PPO loss with a penalty (Lagrange-constrained PPO).
+
+Flux 0.16 port: same model-first signature as ppo_loss.
 """
-function lagrange_ppo_loss(π, 𝒫, 𝒟; info = Dict())
-    new_probs = logpdf(π, 𝒟[:s], 𝒟[:a])
+function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
+    new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
     r = exp.(new_probs .- 𝒟[:logprob])
 
     A = 𝒟[:advantage]
     p_loss = -mean(min.(r .* A, clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* A))
-    e_loss = -mean(entropy(π, 𝒟[:s]))
+    e_loss = -mean(entropy(m, 𝒟[:s]))
 
     #update the cost penalty
     penalty = ignore_derivatives() do
@@ -206,8 +211,8 @@ function LagrangePPO(;
                     Vc=Vc,
                     log = LoggerParams(;dir = "log/lagrange_ppo", log...),
                     a_opt = TrainingParams(;loss = lagrange_ppo_loss, early_stopping = (infos) -> (infos[end][:kl] > target_kl), name = "actor_", a_opt...),
-                    c_opt = TrainingParams(;loss = (π, 𝒫, D; kwargs...) -> Flux.mse(value(π, D[:s]), D[:return]), name = "critic_", c_opt...),
-                    cost_opt = TrainingParams(;loss = (π, 𝒫, D; kwargs...) -> Flux.mse(value(π, D[:s]), D[:cost_return]), name = "cost_critic_", cost_opt...),
+                    c_opt = TrainingParams(;loss = (m, 𝒫, D; kwargs...) -> Flux.mse(value(m, D[:s]), D[:return]), name = "critic_", c_opt...),
+                    cost_opt = TrainingParams(;loss = (m, 𝒫, D; kwargs...) -> Flux.mse(value(m, D[:s]), D[:cost_return]), name = "cost_critic_", cost_opt...),
                     required_columns = unique([required_columns..., :return, :advantage, :logprob, :cost_advantage, :cost, :cost_return]),
                     post_batch_callback = (𝒟; kwargs...) -> (𝒟[:advantage] .= whiten(𝒟[:advantage])),
                     post_sample_callback=record_avgr,

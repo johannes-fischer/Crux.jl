@@ -14,7 +14,8 @@ v = zeros(4,4,4)
 c1 = ConstantLayer(ones(10))
 @test Crux.device(c1) == cpu
 @test c1(rand(100)) == c1.vec
-@test Flux.params(c1)[1] == c1.vec
+# Flux 0.16 port: implicit `Flux.params` is gone; check the underlying field.
+@test c1.vec == ones(10)
 
 if USE_CUDA
     c2 = c1 |> gpu
@@ -36,20 +37,17 @@ o = ObjectCategorical(objs)
 @test logpdf(o, [:up]) == logpdf(o, [:down])
 @test size(logpdf(o, rand(o,10))) == (1,10)
 
-## Flux Stuff
+## Flux Stuff — global_grad_norm helper
+# Flux 0.16 port: the old `LinearAlgebra.norm(::Zygote.Grads)` overload is
+# gone; Crux now exposes `global_grad_norm(grads_tree; p=2)` for explicit
+# gradients. Rebuild the test in that style.
 W = rand(2, 5)
 b = rand(2)
-
-predict(x) = (W * x) .+ b
-loss(x, y) = sum((predict(x) .- y).^2)
-
-x, y = rand(5), rand(2) # Dummy data
-l = loss(x, y) # ~ 3
-
-θ = Flux.params(W, b)
-grads = Flux.gradient(() -> loss(x, y), θ)
-
-@test norm(grads) > 1
+x, y = rand(5), rand(2)
+loss_fn(W, b) = sum(((W * x) .+ b .- y).^2)
+val, grads = Flux.withgradient(loss_fn, W, b)
+@test val > 0
+@test Crux.global_grad_norm(grads) > 1
 
 
 ##  MultitaskDecay Schedule
