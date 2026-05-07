@@ -267,6 +267,9 @@ function fill_gae!(d, episode_range, V, λ::Float32, γ::Float32; source = :r, t
         Vs = value(V, bslice(d[:s], i:i))
         @assert length(Vs) == 1
         A = c*A + d[source][1,i] + (1.f0 - d[:done][1,i])*γ*Vsp[1] - Vs[1]
+        if isnan(A)
+            @warn "fill_gae! NaN at i=$i" r=d[source][1,i] done=d[:done][1,i] Vsp=Vsp[1] Vs=Vs[1]
+        end
         @assert !isnan(A)
         d[target][:, i] .= A
     end

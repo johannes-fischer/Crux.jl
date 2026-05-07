@@ -1,14 +1,14 @@
 """
 REINFORCE loss function.
 """
-function reinforce_loss(π, 𝒫, 𝒟; info = Dict())
-    new_probs = logpdf(π, 𝒟[:s], 𝒟[:a])
-    
+function reinforce_loss(m, 𝒫, 𝒟; info = Dict())  # Flux 0.16 port: model-first signature
+    new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
+
     ignore_derivatives() do
-        info[:entropy] = mean(entropy(π, 𝒟[:s]))
+        info[:entropy] = mean(entropy(m, 𝒟[:s]))
         info[:kl] = mean(𝒟[:logprob] .- new_probs)
-    end 
-    
+    end
+
     -mean(new_probs .* 𝒟[:return])
 end
 

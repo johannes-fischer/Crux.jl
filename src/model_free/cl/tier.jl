@@ -1,12 +1,15 @@
+# Flux 0.16 port: model-first loss signatures, π_loss kwarg threaded for losses
+# that need access to the full policy (TIER_TD3_actor_loss reaches into the
+# frozen critic; the rest stay differentiated through the model passed by
+# off_policy.jl).
 function TIER_td_loss(;loss=Flux.mse, name=:Qavg, s_key=:s, a_key=:a, weight=nothing)
-    (π, 𝒫, 𝒟, y; info=Dict(), z) -> begin
-        Q = value(π, vcat(z, 𝒟[s_key]), 𝒟[a_key]) 
-        
-        # Store useful information
+    (m, 𝒫, 𝒟, y; info=Dict(), z, π_loss=m) -> begin
+        Q = value(m, vcat(z, 𝒟[s_key]), 𝒟[a_key])
+
         ignore_derivatives() do
             info[name] = mean(Q)
         end
-        
+
         loss(Q, y, agg = isnothing(weight) ? mean : weighted_mean(𝒟[weight]))
     end
 end
@@ -14,14 +17,19 @@ end
 function TIER_double_Q_loss(;name1=:Q1avg, name2=:Q2avg, kwargs...)
     l1 = TIER_td_loss(;name=name1, kwargs...)
     l2 = TIER_td_loss(;name=name2, kwargs...)
-    
-    (π, 𝒫, 𝒟, y; info=Dict(), z=𝒟[:z]) -> begin
-        .5f0*(l1(critic(π).N1, 𝒫, 𝒟, y, info=info, z=z) + l2(critic(π).N2, 𝒫, 𝒟, y, info=info,z=z))
+
+    # `m` here is the (Double-)critic itself — `critic(m) = m` for NetworkPolicy,
+    # so we just reach into m.N1/N2 directly.
+    (m, 𝒫, 𝒟, y; info=Dict(), z=𝒟[:z], π_loss=m) -> begin
+        .5f0*(l1(m.N1, 𝒫, 𝒟, y, info=info, z=z) + l2(m.N2, 𝒫, 𝒟, y, info=info, z=z))
     end
 end
 
 
-TIER_TD3_actor_loss(π, 𝒫, 𝒟; info = Dict()) = -mean(value(critic(π).N1, vcat(𝒟[:z], 𝒟[:s]), action(actor(π), vcat(𝒟[:z], 𝒟[:s]))))
+function TIER_TD3_actor_loss(m, 𝒫, 𝒟; info=Dict(), π_loss=m)
+    π_frozen = ignore_derivatives(π_loss)
+    -mean(value(critic(π_frozen).N1, vcat(𝒟[:z], 𝒟[:s]), action(m, vcat(𝒟[:z], 𝒟[:s]))))
+end
 
 function TIER_TD3_target(π, 𝒫, 𝒟, γ::Float32; i, z=𝒟[:z]) 
     ap, _ = exploration(𝒫[:π_smooth], vcat(z, 𝒟[:sp]), π_on=actor(π), i=i)
@@ -122,10 +130,14 @@ function TIER(;π,
         info["Experience_size_z"] = length(buffer_obs)
         info["Experience_small_buff_size"] = length(small_buffer)
         
-        # Train the obs model
+        # Train the obs model. Flux 0.16 port: the user-supplied
+        # `obs_opt.loss` must take the model as the first arg (Zygote
+        # differentiates w.r.t. it).
         for j=1:obs_opt.epochs
             rand!(𝒟obs, buffer_obs, small_buffer, fracs=[0.5, 0.5])
-            train!(Flux.params(observation_model), (;kwargs...) -> obs_opt.loss(observation_model, 𝒟obs; kwargs...), obs_opt, info=info)
+            train!(observation_model, obs_opt,
+                   (m; kwargs...) -> obs_opt.loss(m, 𝒟obs; kwargs...),
+                   info=info)
         end
     end
 

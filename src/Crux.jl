@@ -14,7 +14,8 @@ module Crux
     @reexport using Flux
     using Zygote
     import Zygote: ignore_derivatives, Zeros
-    using Flux.Optimise: train!
+    # Flux 0.16 port: define our own `train!` instead of extending
+    # `Flux.Optimise.train!` (gone in 0.16). See src/training.jl.
     using CUDA
     using LinearAlgebra
     using ValueHistories

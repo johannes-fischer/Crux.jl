@@ -3,8 +3,16 @@ device(v::T) where T <: AbstractArray = cpu
 device(v::SubArray{T,N,P,I,L}) where {T, N, P <: CuArray, I, L} = gpu
 device(v::SubArray{T,N,P,I,L}) where {T, N, P <: AbstractArray, I, L} = cpu
 function device(c)
-    p = Flux.params(c)
-    length(p) > 0 && p[1] isa CuArray ? gpu : cpu
+    # Flux 0.16 port: implicit `Flux.params` is gone. Walk the model tree with
+    # Functors; if any CuArray leaf is present we live on the GPU, otherwise CPU.
+    is_gpu = Ref(false)
+    Flux.fmap(c) do x
+        if x isa CuArray
+            is_gpu[] = true
+        end
+        x
+    end
+    is_gpu[] ? gpu : cpu
 end
 
 # Call F with input x but ensure they are both on the device of F

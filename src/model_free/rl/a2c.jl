@@ -1,10 +1,10 @@
 """
 A2C loss function.
 """
-function a2c_loss(π, 𝒫, 𝒟; info = Dict())
-    new_probs = logpdf(π, 𝒟[:s], 𝒟[:a])
+function a2c_loss(m, 𝒫, 𝒟; info = Dict())  # Flux 0.16 port: model-first signature
+    new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
     p_loss = -mean(new_probs .* 𝒟[:advantage])
-    e_loss = -mean(entropy(π, 𝒟[:s]))
+    e_loss = -mean(entropy(m, 𝒟[:s]))
     
     # Log useful information
     ignore_derivatives() do
@@ -44,7 +44,7 @@ function A2C(;
                     𝒫=(λp=λp, λe=λe),
                     log=LoggerParams(;dir = "log/a2c", log...),
                     a_opt=TrainingParams(;loss=a2c_loss, early_stopping = (infos) -> (infos[end][:kl] > 0.015), name = "actor_", a_opt...),
-                    c_opt=TrainingParams(;loss=(π, 𝒫, D; kwargs...) -> Flux.mse(value(π, D[:s]), D[:return]), name = "critic_", c_opt...),
+                    c_opt=TrainingParams(;loss=(m, 𝒫, D; kwargs...) -> Flux.mse(value(m, D[:s]), D[:return]), name = "critic_", c_opt...),
                     post_sample_callback=(𝒟; kwargs...) -> (𝒟[:advantage] .= whiten(𝒟[:advantage])),
                     required_columns = unique([required_columns..., :return, :logprob, :advantage]),
                     kwargs...)

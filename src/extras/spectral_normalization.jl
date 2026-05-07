@@ -31,9 +31,7 @@ function DenseSN(in::Integer, out::Integer, σ=identity; init=Flux.glorot_unifor
   DenseSN(init(out, in), bias, σ, n_iterations, u)
 end
 
-Flux.@functor DenseSN
-
-Flux.trainable(a::DenseSN) = (a.weight, a.bias)
+Flux.@layer DenseSN trainable=(weight, bias)
 
 function (a::DenseSN)(x::AbstractVecOrMat)
   W, b, σ = a.weight, a.bias, a.σ
@@ -77,9 +75,7 @@ function ConvSN(k::NTuple{N,Integer}, ch::Pair{<:Integer,<:Integer}, σ = identi
   ConvSN(weight, bias, σ, stride = stride, pad = pad, dilation = dilation, n_iterations = n_iterations)
 end
 
-Flux.@functor ConvSN
-
-Flux.trainable(a::ConvSN) = (a.weight, a.bias)
+Flux.@layer ConvSN trainable=(weight, bias)
 
 function (c::ConvSN)(x::AbstractArray)
   σ, b = c.σ, reshape(c.bias, ntuple(_->1, length(c.stride))..., :, 1)

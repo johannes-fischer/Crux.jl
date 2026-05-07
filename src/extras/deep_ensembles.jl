@@ -3,9 +3,7 @@ struct DeepEnsemble
         DeepEnsemble(generator, N::Int) = new([generator() for _=1:N])
 end
 
-Flux.@functor DeepEnsemble 
-
-Flux.trainable(m::DeepEnsemble) = (Flux.trainable(model) for model in m.models)
+Flux.@layer DeepEnsemble trainable=(models,)
 
 # Get the mean and variance estimate from each network individually
 function individual_forward(m::DeepEnsemble, x)
@@ -41,9 +39,7 @@ struct DeepClassificationEnsemble
         DeepClassificationEnsemble(generator, N::Int) = new([generator() for _=1:N])
 end
 
-Flux.@functor DeepClassificationEnsemble 
-
-Flux.trainable(m::DeepClassificationEnsemble) = (Flux.trainable(model) for model in m.models)
+Flux.@layer DeepClassificationEnsemble trainable=(models,)
 
 # Get the mean and variance estimate from each network individually
 function individual_forward(m::DeepClassificationEnsemble, x)

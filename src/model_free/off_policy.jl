@@ -82,22 +82,35 @@ function value_training(𝒮::OffPolicySolver, 𝒟, γ)
         # Update priorities (for prioritized replay)
         isprioritized(𝒮.buffer) && update_priorities!(𝒮.buffer, 𝒟.indices, cpu(𝒮.priority_fn(𝒮.agent.π, 𝒮.𝒫, 𝒟, y)))
         
-        # Train parameters
-        for (θs, p_opt) in 𝒮.param_optimizers
-            train!(θs, (;kwargs...) -> p_opt.loss(𝒮.agent.π, 𝒮.𝒫, 𝒟; kwargs...), p_opt, info=info)
-        end
-        
-        # Train the critic
-        if ((epoch-1) % 𝒮.c_opt.update_every) == 0
-            train!(critic(𝒮.agent.π), (;kwargs...) -> 𝒮.c_opt.loss(𝒮.agent.π, 𝒮.𝒫, 𝒟, y; kwargs...), 𝒮.c_opt, info=info)
-        end
-        
-        # Train the actor 
-        if !isnothing(𝒮.a_opt) && ((epoch-1) % 𝒮.a_opt.update_every) == 0
-            train!(actor(𝒮.agent.π), (;kwargs...) -> 𝒮.a_opt.loss(𝒮.agent.π, 𝒮.𝒫, 𝒟; kwargs...), 𝒮.a_opt, info=info)
-        
-            # Update the target network
-            𝒮.target_update(𝒮.agent.π⁻, 𝒮.agent.π)
+        # Train parameters (Flux 0.16 port: model-first train!; loss receives
+        # the differentiated `m` plus the full policy via `π_loss=…`). The
+        # full π is bound into a local before the closure to keep Zygote from
+        # reaching back through the solver struct (it can't follow `𝒮.agent.π`
+        # without also tracking 𝒮 as a closed-over Ref, which can confuse the
+        # accum pass when m is a sub-tree of π).
+        let π_full = 𝒮.agent.π, 𝒫_local = 𝒮.𝒫, 𝒟_local = 𝒟, y_local = y
+            for (θs, p_opt) in 𝒮.param_optimizers
+                p_loss_fn = p_opt.loss
+                train!(θs, p_opt,
+                       (m; info=Dict()) -> p_loss_fn(m, 𝒫_local, 𝒟_local; π_loss=π_full, info=info),
+                       info=info)
+            end
+
+            if ((epoch-1) % 𝒮.c_opt.update_every) == 0
+                c_loss_fn = 𝒮.c_opt.loss
+                train!(critic(π_full), 𝒮.c_opt,
+                       (m; info=Dict()) -> c_loss_fn(m, 𝒫_local, 𝒟_local, y_local; π_loss=π_full, info=info),
+                       info=info)
+            end
+
+            if !isnothing(𝒮.a_opt) && ((epoch-1) % 𝒮.a_opt.update_every) == 0
+                a_loss_fn = 𝒮.a_opt.loss
+                train!(actor(π_full), 𝒮.a_opt,
+                       (m; info=Dict()) -> a_loss_fn(m, 𝒫_local, 𝒟_local; π_loss=π_full, info=info),
+                       info=info)
+
+                𝒮.target_update(𝒮.agent.π⁻, π_full)
+            end
         end
         
         # Store the training information
