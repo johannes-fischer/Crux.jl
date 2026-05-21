@@ -3,12 +3,20 @@ PPO loss function.
 
 Flux 0.16 port: takes the differentiated model `m` (the actor) as its first
 argument so it composes directly with `Flux.withgradient(m -> …, model)`.
+
+cleanrl-style detail: advantages are whitened **per-minibatch** here (`whiten`
+is applied to the slice the loss sees, not once over the whole rollout
+buffer). This matches the canonical PPO implementation tricks; the
+rollout-wide whitening that previously lived in `post_batch_callback` is
+removed.
 """
 function ppo_loss(m, 𝒫, 𝒟; info = Dict())
     new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
     r = exp.(new_probs .- 𝒟[:logprob])
 
-    A = 𝒟[:advantage]
+    A_raw = 𝒟[:advantage]
+    # Per-minibatch advantage normalization (cleanrl ppo.py:262)
+    A = ignore_derivatives(() -> whiten(A_raw))
     p_loss = -mean(min.(r .* A, clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* A))
     e_loss = -mean(entropy(m, 𝒟[:s]))
 
@@ -17,7 +25,7 @@ function ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:entropy] = -e_loss
         info[:kl] = mean(𝒟[:logprob] .- new_probs)
         info[:clip_fraction] = sum((r .> 1 + 𝒫[:ϵ]) .| (r .< 1 - 𝒫[:ϵ])) / length(r)
-        info[:avg_advantage] = mean(A)
+        info[:avg_advantage] = mean(A_raw)
         info[:avg_return] = mean(𝒟[:return])
     end
     𝒫[:λp]*p_loss + 𝒫[:λe]*e_loss
@@ -75,6 +83,7 @@ end
 Proximal policy optimization (PPO) solver.
 
 cleanrl-aligned defaults:
+- Per-minibatch advantage normalization inside `ppo_loss`.
 - Value clipping (Schulman/cleanrl `--clip-vloss`) at `vclip = ϵ`. Set
   `vclip=nothing` to disable; in that case the `:value` column is also
   unused and falls back to plain MSE.
@@ -120,7 +129,6 @@ function PPO(;
                     log = LoggerParams(;dir = "log/ppo", log...),
                     a_opt = TrainingParams(;loss = ppo_loss, early_stopping = (infos) -> (infos[end][:kl] > target_kl), name = "actor_", a_opt...),
                     c_opt = TrainingParams(;loss = ppo_critic_loss, name = "critic_", c_opt...),
-                    post_batch_callback = (𝒟; kwargs...) -> (𝒟[:advantage] .= whiten(𝒟[:advantage])),
                     required_columns = unique([required_columns..., :return, :logprob, :advantage, extra_cols...]),
                     post_sample_callback=record_avgr,
                     kwargs...)
@@ -135,7 +143,9 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
     new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
     r = exp.(new_probs .- 𝒟[:logprob])
 
-    A = 𝒟[:advantage]
+    A_raw = 𝒟[:advantage]
+    # Per-minibatch advantage normalization (matches PPO).
+    A = ignore_derivatives(() -> whiten(A_raw))
     p_loss = -mean(min.(r .* A, clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* A))
     e_loss = -mean(entropy(m, 𝒟[:s]))
 
@@ -188,7 +198,7 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:clip_fraction] = sum((r .> 1 + 𝒫[:ϵ]) .| (r .< 1 - 𝒫[:ϵ])) / length(r)
         info["p_loss"] = 𝒫[:λp]*p_loss
         info["cost_loss"] = cost_loss
-        info[:avg_advantage] = mean(A)
+        info[:avg_advantage] = mean(A_raw)
         info[:avg_return] = mean(𝒟[:return])
     end
     (𝒫[:λp]*p_loss + 𝒫[:λe]*e_loss + cost_loss) / (1 + penalty)
@@ -292,7 +302,6 @@ function LagrangePPO(;
                     c_opt = TrainingParams(;loss = ppo_critic_loss, name = "critic_", c_opt...),
                     cost_opt = TrainingParams(;loss = ppo_cost_critic_loss, name = "cost_critic_", cost_opt...),
                     required_columns = unique([required_columns..., :return, :advantage, :logprob, :cost_advantage, :cost, :cost_return, extra_cols...]),
-                    post_batch_callback = (𝒟; kwargs...) -> (𝒟[:advantage] .= whiten(𝒟[:advantage])),
                     post_sample_callback=record_avgr,
                     kwargs...)
 end

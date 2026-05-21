@@ -57,14 +57,17 @@ Base.length(::LearnableScalar) = 1
 
 
 ## Useful functions
-whiten(v) = whiten(v, mean(v), std(v))
+function whiten(v)
+    μ = mean(v)
+    whiten(v, μ, std(v) + eps(eltype(μ)))
+end
 whiten(v, μ, σ) = (v .- μ) ./ σ
 
 to2D(W) = reshape(W, :, size(W, ndims(W))) # convert a multidimensional weight matrix to 2D
 
 # Weighted mean aggregator
 weighted_mean(weights) = (y) -> mean(y .* weights)
-    
+
 # --- Flux 0.16 port: gradient L2/Lp norm walking a NamedTuple grad tree ---
 # Replaces the old `norm(::Zygote.Grads)` overload, which only existed for the
 # implicit-params API. The new `Flux.gradient(model)` returns a tree shaped
