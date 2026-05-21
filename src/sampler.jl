@@ -53,7 +53,7 @@ end
 function terminate_episode!(sampler::Sampler, data, j)
     data[:episode_end][1,j] = true
     ep = j - sampler.episode_length + 1 : j
-    haskey(data, :advantage) && fill_gae!(data, ep, sampler.agent.π, sampler.λ, sampler.γ)
+    haskey(data, :advantage) && fill_gae!(data, ep, sampler.agent.π, sampler.λ, sampler.γ; value_col=:value)
     haskey(data, :return) && fill_returns!(data, ep, sampler.γ)
     haskey(data, :fwd_importance_weight) && fill_fwd_importance_weight!(data, ep)
     haskey(data, :cum_importance_weight) && fill_cum_importance_weight!(data, ep)
@@ -62,7 +62,7 @@ function terminate_episode!(sampler::Sampler, data, j)
     haskey(data, :traj_importance_weight) && (data[:traj_importance_weight][1,ep] .= sampler.traj_weight_fn(sampler.agent, data, ep))
 
     # Dealing with cost constraints
-    haskey(data, :cost_advantage) && fill_gae!(data, ep, sampler.Vc, sampler.λ, sampler.γ, source=:cost, target=:cost_advantage)
+    haskey(data, :cost_advantage) && fill_gae!(data, ep, sampler.Vc, sampler.λ, sampler.γ, source=:cost, target=:cost_advantage, value_col=:cost_value)
     haskey(data, :cost_return) && fill_returns!(data, ep, sampler.γ, source=:cost, target=:cost_return)
 
     reset_sampler!(sampler)
@@ -259,9 +259,13 @@ function fill_gae!(d::ExperienceBuffer, V, λ::Float32, γ::Float32)
     end
 end
 
-function fill_gae!(d, episode_range, V, λ::Float32, γ::Float32; source = :r, target = :advantage)
+function fill_gae!(d, episode_range, V, λ::Float32, γ::Float32; source = :r, target = :advantage, value_col::Union{Symbol, Nothing} = nothing)
     A, c = 0f0, λ*γ
     nd = ndims(d[:s])
+    # Cache V(s) at rollout time so PPO-style critic losses can clip their
+    # update to within ±ϵ of the value used at action-selection time. Opt in
+    # by passing `value_col` and allocating that column on the buffer.
+    has_value = !isnothing(value_col) && haskey(d, value_col)
     for i in reverse(episode_range)
         Vsp = value(V, bslice(d[:sp], i:i))
         Vs = value(V, bslice(d[:s], i:i))
@@ -272,6 +276,7 @@ function fill_gae!(d, episode_range, V, λ::Float32, γ::Float32; source = :r, t
         end
         @assert !isnan(A)
         d[target][:, i] .= A
+        has_value && (d[value_col][:, i] .= Vs[1])
     end
 end
 

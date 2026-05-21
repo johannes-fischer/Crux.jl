@@ -24,7 +24,60 @@ function ppo_loss(m, 𝒫, 𝒟; info = Dict())
 end
 
 """
+PPO critic (value) loss.
+
+If the rollout stored an `:value` column (V(s) at action-selection time) and
+`𝒫[:vclip]` is set, the new value is clipped to within ±vclip of the old
+value before computing MSE — the cleanrl/spinningup "v_clipped" trick that
+keeps the critic from drifting too far on a single update batch:
+
+    v_clipped = v_old + clamp(v_new − v_old, −ϵ, +ϵ)
+    L = mean(max((v_new − ret)², (v_clipped − ret)²))
+
+If `:value` isn't in the buffer, falls back to plain MSE.
+"""
+function ppo_critic_loss(m, 𝒫, 𝒟; info = Dict(), kwargs...)
+    v_new = value(m, 𝒟[:s])
+    ret = 𝒟[:return]
+    if haskey(𝒫, :vclip) && !isnothing(𝒫[:vclip]) && haskey(𝒟, :value)
+        v_old = 𝒟[:value]
+        ϵv = 𝒫[:vclip]
+        v_clipped = v_old .+ clamp.(v_new .- v_old, -ϵv, ϵv)
+        loss = mean(max.((v_new .- ret) .^ 2, (v_clipped .- ret) .^ 2))
+    else
+        loss = Flux.mse(v_new, ret)
+    end
+    loss
+end
+
+"""
+LagrangePPO cost-critic (Vc) value loss.
+
+Mirrors `ppo_critic_loss` but reads `𝒟[:cost_return]` and `𝒟[:cost_value]`
+and clips with `𝒫[:vclip_cost]`. Falls back to plain MSE if either the
+column or the clip range is absent.
+"""
+function ppo_cost_critic_loss(m, 𝒫, 𝒟; info = Dict(), kwargs...)
+    v_new = value(m, 𝒟[:s])
+    ret = 𝒟[:cost_return]
+    if haskey(𝒫, :vclip_cost) && !isnothing(𝒫[:vclip_cost]) && haskey(𝒟, :cost_value)
+        v_old = 𝒟[:cost_value]
+        ϵv = 𝒫[:vclip_cost]
+        v_clipped = v_old .+ clamp.(v_new .- v_old, -ϵv, ϵv)
+        loss = mean(max.((v_new .- ret) .^ 2, (v_clipped .- ret) .^ 2))
+    else
+        loss = Flux.mse(v_new, ret)
+    end
+    loss
+end
+
+"""
 Proximal policy optimization (PPO) solver.
+
+cleanrl-aligned defaults:
+- Value clipping (Schulman/cleanrl `--clip-vloss`) at `vclip = ϵ`. Set
+  `vclip=nothing` to disable; in that case the `:value` column is also
+  unused and falls back to plain MSE.
 
 ```julia
 PPO(;
@@ -33,6 +86,7 @@ PPO(;
     λp::Float32 = 1f0,
     λe::Float32 = 0.1f0,
     target_kl = 0.012f0,
+    vclip::Union{Float32, Nothing} = ϵ,
     a_opt::NamedTuple=(;),
     c_opt::NamedTuple=(;),
     log::NamedTuple=(;),
@@ -46,6 +100,7 @@ function PPO(;
         λp::Float32 = 1f0,
         λe::Float32 = 0.1f0,
         target_kl = 0.012f0,
+        vclip::Union{Float32, Nothing} = ϵ,
         a_opt::NamedTuple=(;),
         c_opt::NamedTuple=(;),
         log::NamedTuple=(;),
@@ -56,13 +111,17 @@ function PPO(;
          info[:avg_r] = sum(𝒟[:r]) / sum(𝒟[:episode_end])
      end
 
+     # Add :value column when value clipping is on; the sampler's fill_gae!
+     # writes V(s) at rollout time so ppo_critic_loss can clip the update.
+     extra_cols = isnothing(vclip) ? Symbol[] : Symbol[:value]
+
      OnPolicySolver(;agent=PolicyParams(π),
-                    𝒫=(ϵ=ϵ, λp=λp, λe=λe),
+                    𝒫=(ϵ=ϵ, λp=λp, λe=λe, vclip=vclip),
                     log = LoggerParams(;dir = "log/ppo", log...),
                     a_opt = TrainingParams(;loss = ppo_loss, early_stopping = (infos) -> (infos[end][:kl] > target_kl), name = "actor_", a_opt...),
-                    c_opt = TrainingParams(;loss = (m, 𝒫, D; kwargs...) -> Flux.mse(value(m, D[:s]), D[:return]), name = "critic_", c_opt...),
+                    c_opt = TrainingParams(;loss = ppo_critic_loss, name = "critic_", c_opt...),
                     post_batch_callback = (𝒟; kwargs...) -> (𝒟[:advantage] .= whiten(𝒟[:advantage])),
-                    required_columns = unique([required_columns..., :return, :logprob, :advantage]),
+                    required_columns = unique([required_columns..., :return, :logprob, :advantage, extra_cols...]),
                     post_sample_callback=record_avgr,
                     kwargs...)
 end
@@ -138,6 +197,12 @@ end
 """
 Lagrange-Constrained PPO solver.
 
+Value clipping (PPO `--clip-vloss`) is supported separately for the reward
+and cost critics via `vclip` and `vclip_cost`. Each defaults to `ϵ`; set to
+`nothing` to disable. When set, the rollout caches `Vr(s)` / `Vc(s)` at
+action-selection time into `:value` / `:cost_value` so the critic losses can
+clip their update.
+
 ```julia
 LagrangePPO(;
     π::ActorCritic,
@@ -155,6 +220,8 @@ LagrangePPO(;
     Kp = 1,
     Kd = 0,
     ema_α = 0.95,
+    vclip::Union{Float32, Nothing} = ϵ,
+    vclip_cost::Union{Float32, Nothing} = ϵ,
     a_opt::NamedTuple=(;),
     c_opt::NamedTuple=(;),
     cost_opt::NamedTuple=(;),
@@ -180,6 +247,8 @@ function LagrangePPO(;
     Kp = 1,
     Kd = 0,
     ema_α = 0.95,
+    vclip::Union{Float32, Nothing} = ϵ,
+    vclip_cost::Union{Float32, Nothing} = ϵ,
     a_opt::NamedTuple=(;),
     c_opt::NamedTuple=(;),
     cost_opt::NamedTuple=(;),
@@ -203,17 +272,26 @@ function LagrangePPO(;
         Kd=Kd,
         ema_α=ema_α,
         smooth_Δ = [0f0],
-        smooth_Jc = [0f0]
+        smooth_Jc = [0f0],
+        vclip=vclip,
+        vclip_cost=vclip_cost,
         )
+
+     # Add :value / :cost_value columns when the respective clip is enabled;
+     # the sampler's fill_gae! writes Vr(s) / Vc(s) at rollout time so the
+     # critic losses can clip their updates.
+     extra_cols = Symbol[]
+     isnothing(vclip)      || push!(extra_cols, :value)
+     isnothing(vclip_cost) || push!(extra_cols, :cost_value)
 
      OnPolicySolver(;agent=PolicyParams(π),
                     𝒫=𝒫,
                     Vc=Vc,
                     log = LoggerParams(;dir = "log/lagrange_ppo", log...),
                     a_opt = TrainingParams(;loss = lagrange_ppo_loss, early_stopping = (infos) -> (infos[end][:kl] > target_kl), name = "actor_", a_opt...),
-                    c_opt = TrainingParams(;loss = (m, 𝒫, D; kwargs...) -> Flux.mse(value(m, D[:s]), D[:return]), name = "critic_", c_opt...),
-                    cost_opt = TrainingParams(;loss = (m, 𝒫, D; kwargs...) -> Flux.mse(value(m, D[:s]), D[:cost_return]), name = "cost_critic_", cost_opt...),
-                    required_columns = unique([required_columns..., :return, :advantage, :logprob, :cost_advantage, :cost, :cost_return]),
+                    c_opt = TrainingParams(;loss = ppo_critic_loss, name = "critic_", c_opt...),
+                    cost_opt = TrainingParams(;loss = ppo_cost_critic_loss, name = "cost_critic_", cost_opt...),
+                    required_columns = unique([required_columns..., :return, :advantage, :logprob, :cost_advantage, :cost, :cost_return, extra_cols...]),
                     post_batch_callback = (𝒟; kwargs...) -> (𝒟[:advantage] .= whiten(𝒟[:advantage])),
                     post_sample_callback=record_avgr,
                     kwargs...)
