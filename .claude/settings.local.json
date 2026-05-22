@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(/home/fischer/dev/jl/DroneDatasetAdapter/src/**)",
+      "Bash(julia:*)",
+      "Read(/home/fischer/dev/jl/AutomotiveSimulator/**)",
+      "Read(/home/fischer/dev/jl/autonomousmergingexperiments/**)",
+      "Bash(tree:*)",
+      "Bash(wc:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(ls:*)",
+      "WebFetch(domain:juliapomdp.github.io)",
+      "WebSearch",
+      "Bash(grep:*)"
+    ],
+    "additionalDirectories": [
+      "/home/fischer/dev/jl/AutomotiveSimulator/",
+      "/home/fischer/dev/jl/AutomotiveVisualization/",
+      "/home/fischer/dev/jl/DroneDatasetAdapter/",
+      "/home/fischer/dev/jl/DroneDatasetAnalysis/",
+      "/home/fischer/dev/jl/Lanelet2/",
+      "/home/fischer/dev/jl/POMDPs",
+      "/home/fischer/dev/jl/DriverModels/",
+      "/home/fischer/dev/jl/autonomousmergingexperiments/dev/AutonomousMerging/",
+      "/home/fischer/dev/jl/GumbelSoftmax/",
+      "/home/fischer/dev/jl/DroneDatasetEnv/",
+      "/home/fischer/dev/jl/BetaZero/",
+      "/home/fischer/dev/jl/GaussianFilters/"
+    ]
+  }
+}
