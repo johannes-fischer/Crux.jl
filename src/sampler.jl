@@ -19,6 +19,13 @@
 
     # Trajectory-level measurements
     traj_weight_fn=nothing # weight of the trajectory
+
+    # Episodes whose advantage/return/etc. columns are still to be filled.
+    # Populated by `terminate_episode!` and `flush_open_episode!`, drained
+    # by `drain_pending_episodes!` once per rollout — this lets us batch
+    # the value-network forward over the WHOLE buffer (2 calls per network
+    # per rollout total) instead of once per episode or once per step.
+    pending_episodes::Vector{UnitRange{Int}} = UnitRange{Int}[]
 end
 
 Sampler(mdp, π::T; kwargs...) where {T <: Policy} = Sampler(;mdp=mdp, agent=PolicyParams(π), kwargs...)
@@ -50,22 +57,61 @@ function initial_observation(mdp, s)
     end
 end
 
+# Record a naturally-terminated episode. The GAE/returns columns are NOT
+# filled here — they're deferred to `drain_pending_episodes!` so the V()
+# forward can be batched over the whole rollout buffer (1 call per network).
 function terminate_episode!(sampler::Sampler, data, j)
     data[:episode_end][1,j] = true
-    ep = j - sampler.episode_length + 1 : j
-    haskey(data, :advantage) && fill_gae!(data, ep, sampler.agent.π, sampler.λ, sampler.γ; value_col=:value)
-    haskey(data, :return) && fill_returns!(data, ep, sampler.γ)
-    haskey(data, :fwd_importance_weight) && fill_fwd_importance_weight!(data, ep)
-    haskey(data, :cum_importance_weight) && fill_cum_importance_weight!(data, ep)
-    haskey(data, :rev_importance_weight) && fill_rev_importance_weight!(data, ep)
-
-    haskey(data, :traj_importance_weight) && (data[:traj_importance_weight][1,ep] .= sampler.traj_weight_fn(sampler.agent, data, ep))
-
-    # Dealing with cost constraints
-    haskey(data, :cost_advantage) && fill_gae!(data, ep, sampler.Vc, sampler.λ, sampler.γ, source=:cost, target=:cost_advantage, value_col=:cost_value)
-    haskey(data, :cost_return) && fill_returns!(data, ep, sampler.γ, source=:cost, target=:cost_return)
-
+    push!(sampler.pending_episodes, j - sampler.episode_length + 1 : j)
     reset_sampler!(sampler)
+end
+
+# Record an open (mid-) episode at a rollout boundary WITHOUT resetting
+# the sampler's trajectory state. The episode is "paused":
+#   - sampler.s / sampler.svec are kept so the next rollout continues stepping
+#     from this state (CleanRL/SB3 carry-state convention).
+#   - :episode_end[1,j] is NOT set — this is a slice cutoff, not a true episode
+#     end (so `avg_r = sum(:r)/sum(:episode_end)` and `episodes(d)` only count
+#     real terminations).
+#   - episode_length is reset to 0 so the next rollout's per-episode bookkeeping
+#     starts from buffer slot 1.
+# GAE bootstrap at the last in-buffer slot is correct because `:done[1,j] == 0`
+# (truncation was not due to isterminal), so `(1-done)·γ·V(sp)` retains the
+# value of the carried state — handled inside `drain_pending_episodes!`.
+function flush_open_episode!(sampler::Sampler, data, j)
+    sampler.episode_length == 0 && return
+    push!(sampler.pending_episodes, j - sampler.episode_length + 1 : j)
+    sampler.episode_length = 0
+end
+
+# Fill advantage/return/value/importance-weight/cost columns for every
+# episode whose range was pushed to `sampler.pending_episodes` during this
+# rollout. V() is evaluated ONCE over the whole buffer per network (so two
+# forwards for the reward critic, two more for Vc when costs are enabled),
+# regardless of how many episodes the buffer contains. This is the only
+# place fill_gae!-style work happens for the parallel-compatible path; the
+# per-episode public `fill_gae!(d, ep, V, …)` API is kept for external
+# callers (GAIL, tests) that pass their own V at higher granularity.
+function drain_pending_episodes!(sampler::Sampler, data)
+    isempty(sampler.pending_episodes) && return
+    need_value = haskey(data, :advantage)
+    need_cost  = haskey(data, :cost_advantage)
+    Vs_all  = need_value ? vec(cpu(value(sampler.agent.π, data[:s])))  : nothing
+    Vsp_all = need_value ? vec(cpu(value(sampler.agent.π, data[:sp]))) : nothing
+    Vcs_all  = need_cost ? vec(cpu(value(sampler.Vc, data[:s])))  : nothing
+    Vcsp_all = need_cost ? vec(cpu(value(sampler.Vc, data[:sp]))) : nothing
+    for ep in sampler.pending_episodes
+        need_value && fill_gae_from_arrays!(data, ep, Vs_all, Vsp_all, sampler.λ, sampler.γ; value_col=:value)
+        haskey(data, :return) && fill_returns!(data, ep, sampler.γ)
+        haskey(data, :fwd_importance_weight) && fill_fwd_importance_weight!(data, ep)
+        haskey(data, :cum_importance_weight) && fill_cum_importance_weight!(data, ep)
+        haskey(data, :rev_importance_weight) && fill_rev_importance_weight!(data, ep)
+        haskey(data, :traj_importance_weight) && (data[:traj_importance_weight][1,ep] .= sampler.traj_weight_fn(sampler.agent, data, ep))
+        # Dealing with cost constraints
+        need_cost && fill_gae_from_arrays!(data, ep, Vcs_all, Vcsp_all, sampler.λ, sampler.γ; source=:cost, target=:cost_advantage, value_col=:cost_value)
+        haskey(data, :cost_return) && fill_returns!(data, ep, sampler.γ; source=:cost, target=:cost_return)
+    end
+    empty!(sampler.pending_episodes)
 end
 
 function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
@@ -145,7 +191,15 @@ function steps!(sampler::Sampler, buffer=nothing; store=nothing, cb=(kwargs...)-
             break
         end
     end
-    reset && terminate_episode!(sampler, data, Nsteps)
+    # Carry-state convention (CleanRL/SB3): at the slice end, if an episode is
+    # still open, record it as a pending episode (no state reset) so the next
+    # rollout continues stepping from sampler.s. Pre-2026-05 behavior
+    # re-initialised state here, throwing away the carried trajectory; that
+    # prevented learning when max_steps > Nsteps.
+    reset && flush_open_episode!(sampler, data, Nsteps)
+    # Drain all pending episodes with ONE batched V() call over the full
+    # rollout buffer (per value/cost network), not one per episode.
+    drain_pending_episodes!(sampler, data)
 
     cb(data) # Run the callback on the dataset before adding it
     !isnothing(store) && push!(store, data) # add it to the storage array if provided
@@ -154,6 +208,23 @@ function steps!(sampler::Sampler, buffer=nothing; store=nothing, cb=(kwargs...)-
     return_episodes ? (data, episodes(data)) : data
 end
 
+# BROKEN — DO NOT USE. Scheduled for replacement by the threaded parallel
+# sampler that's part of the in-progress num_envs work. Three issues:
+#   1. Line `reset && terminate_episode!(sampler, data, Nsteps)` references
+#      `sampler`, but that name only exists inside the inner `for sampler
+#      in samplers` loop whose scope ends at the `end` above — so `reset=true`
+#      hits an `UndefVarError`.
+#   2. Round-robin write layout: env-e's transitions land at non-contiguous
+#      slot indices (e, N+e, 2N+e, …). `fill_gae!` / `fill_gae_from_arrays!`
+#      assume an episode is a *contiguous* `UnitRange{Int}` of buffer slots,
+#      so even if (1) were fixed, GAE would be computed over wrong slot sets.
+#   3. No threading despite the function name implying parallelism — each
+#      env-step runs sequentially on the main thread, so there's no
+#      throughput benefit even when the math would line up.
+# The replacement will: deep-copy mdps per env, batch the policy forward on
+# the main thread, `Threads.@threads` over the env-stepping inner loop, use
+# per-env-contiguous buffer layout, and drain pending episodes with a single
+# whole-buffer V() call (sharing `drain_pending_episodes!` with single-env).
 function steps!(samplers::Vector{T}, buffer=nothing; store=nothing, cb=(kwargs...)->nothing, Nsteps=1, explore=false, i=0, reset=false, return_episodes = false) where {T<:Sampler}
     data = mdp_data(samplers[1].S, samplers[1].agent.space, Nsteps*length(samplers), samplers[1].required_columns)
     j = 1
@@ -191,6 +262,10 @@ function episodes!(sampler::Sampler, buffer=nothing; store=nothing, cb=(kwargs..
         end
     end
     trim!(data, j)
+    # Drain pending episodes (advantage/return/value columns) once the buffer
+    # is fully collected and trimmed. Episode ranges pushed by step! are all
+    # within 1:j, so they're still valid after trim!.
+    drain_pending_episodes!(sampler, data)
 
     cb(data) # Run the callback on the dataset before adding it
     !isnothing(store) && push!(store, data) # add it to the storage array if provided
@@ -259,25 +334,46 @@ function fill_gae!(d::ExperienceBuffer, V, λ::Float32, γ::Float32)
     end
 end
 
-function fill_gae!(d, episode_range, V, λ::Float32, γ::Float32; source = :r, target = :advantage, value_col::Union{Symbol, Nothing} = nothing)
+# Run the GAE reverse-scan over `episode_range` using pre-computed value arrays.
+# Vs_arr[i] / Vsp_arr[i] are looked up at buffer slot `i` (whole-buffer indexing,
+# offset=0) by default; pass `offset=first(episode_range)-1` if the arrays
+# only span the episode itself (length L starting at 1) — used by the public
+# `fill_gae!` wrapper below.
+function fill_gae_from_arrays!(d, episode_range::UnitRange{Int},
+                               Vs_arr::AbstractVector, Vsp_arr::AbstractVector,
+                               λ::Float32, γ::Float32;
+                               source::Symbol = :r, target::Symbol = :advantage,
+                               value_col::Union{Symbol, Nothing} = nothing,
+                               offset::Int = 0)
+    isempty(episode_range) && return
     A, c = 0f0, λ*γ
-    nd = ndims(d[:s])
-    # Cache V(s) at rollout time so PPO-style critic losses can clip their
-    # update to within ±ϵ of the value used at action-selection time. Opt in
-    # by passing `value_col` and allocating that column on the buffer.
     has_value = !isnothing(value_col) && haskey(d, value_col)
     for i in reverse(episode_range)
-        Vsp = value(V, bslice(d[:sp], i:i))
-        Vs = value(V, bslice(d[:s], i:i))
-        @assert length(Vs) == 1
-        A = c*A + d[source][1,i] + (1.f0 - d[:done][1,i])*γ*Vsp[1] - Vs[1]
+        k = i - offset
+        Vs_i, Vsp_i = Vs_arr[k], Vsp_arr[k]
+        A = c*A + d[source][1,i] + (1.f0 - d[:done][1,i])*γ*Vsp_i - Vs_i
         if isnan(A)
-            @warn "fill_gae! NaN at i=$i" r=d[source][1,i] done=d[:done][1,i] Vsp=Vsp[1] Vs=Vs[1]
+            @warn "fill_gae! NaN at i=$i" r=d[source][1,i] done=d[:done][1,i] Vsp=Vsp_i Vs=Vs_i
         end
         @assert !isnan(A)
         d[target][:, i] .= A
-        has_value && (d[value_col][:, i] .= Vs[1])
+        has_value && (d[value_col][:, i] .= Vs_i)
     end
+end
+
+# Per-episode `fill_gae!` public API: computes V() over just this episode
+# (2 dispatches per episode). Kept for external callers — GAIL variants
+# and tests. New on-policy / parallel paths use the whole-buffer route via
+# `drain_pending_episodes!` → `fill_gae_from_arrays!` directly.
+function fill_gae!(d, episode_range, V, λ::Float32, γ::Float32; source = :r, target = :advantage, value_col::Union{Symbol, Nothing} = nothing)
+    isempty(episode_range) && return
+    S_ep  = bslice(d[:s],  episode_range)
+    Sp_ep = bslice(d[:sp], episode_range)
+    Vs_arr  = vec(cpu(value(V, S_ep)))
+    Vsp_arr = vec(cpu(value(V, Sp_ep)))
+    fill_gae_from_arrays!(d, episode_range, Vs_arr, Vsp_arr, λ, γ;
+                          source=source, target=target, value_col=value_col,
+                          offset=first(episode_range) - 1)
 end
 
 function fill_returns!(data, episode_range, γ::Float32; source=:r, target=:return)
