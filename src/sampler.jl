@@ -313,12 +313,13 @@ end
 # `:cost` / `:grasp_success` / `:fail` writes, `new_ep_reset!` for non-Latent
 # policies) is read-only on shared state and safe to run concurrently.
 function steps!(samplers::Vector{T}, buffer=nothing; store=nothing,
-                cb=(kwargs...)->nothing, Nsteps_per_env::Int=1, explore=false,
+                cb=(kwargs...)->nothing, Nsteps::Int=1, explore=false,
                 i=0, reset=false, return_episodes=false) where {T<:Sampler}
     N = length(samplers)
     @assert N >= 1 "need at least one sampler"
-    Nsteps_total = Nsteps_per_env * N
-    data = mdp_data(samplers[1].S, samplers[1].agent.space, Nsteps_total,
+    @assert Nsteps % N == 0 "Nsteps ($Nsteps) must be divisible by length(samplers) ($N)"
+    Nsteps_per_env = Nsteps ÷ N
+    data = mdp_data(samplers[1].S, samplers[1].agent.space, Nsteps,
                     samplers[1].required_columns)
     # Sampler bookkeeping invariant: episode_length starts at 0 on each rollout
     # (either fresh from construction or because the previous rollout's

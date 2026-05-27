@@ -101,66 +101,58 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
 
     mkrng(offset) = isnothing(𝒮.env_seed) ? Random.Xoshiro() : Random.Xoshiro(𝒮.env_seed + offset)
 
+    # Dedicated eval sampler so logging carries state across rollouts.
+    if isnothing(𝒮.log.sampler)
+        𝒮.log.sampler = Sampler(deepcopy(mdp), 𝒮.agent, S=𝒮.S,
+                                max_steps=𝒮.max_steps,
+                                rng=mkrng(999_999))
+    end
+
     if 𝒮.num_envs == 1
         s = Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns, λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc, rng=mkrng(1000))
-        # Dedicated eval sampler to allow to carry state across rollouts
-        if isnothing(𝒮.log.sampler)
-            𝒮.log.sampler = Sampler(deepcopy(mdp), 𝒮.agent, S=𝒮.S,
-                                    max_steps=𝒮.max_steps,
-                                    rng=mkrng(999_999))
-        end
-        # Log the pre-train performance
-        log(𝒮.log, 𝒮.i, 𝒮=𝒮)
-        # Loop over the desired number of environment interactions
-        for 𝒮.i = range(𝒮.i, stop=𝒮.i + 𝒮.N - 𝒮.ΔN, step=𝒮.ΔN)
-            # Info to collect during training
-            info = Dict()
-            # Sample transitions into the batch buffer
-            steps!(s, 𝒟, Nsteps=𝒮.ΔN, explore=true, i=𝒮.i, store=𝒮.interaction_storage,
-                   cb=(D) -> 𝒮.post_sample_callback(D, info=info, 𝒮=𝒮), reset=true)
-            # Post-batch callback, often used for additional training
-            𝒮.post_batch_callback(𝒟, info=info, 𝒮=𝒮)
-            # Train the networks
-            training_info = policy_gradient_training(𝒮, 𝒟)
-            # Post-train callback — fires AFTER training so `training_info`
-            # (actor_loss, critic_loss, kl, entropy, clip_fraction, grad norms,
-            # advantage, returns) is available. Use this hook to log per-iteration
-            # metrics from external systems (e.g. Wandb) instead of intercepting
-            # the internal TBLogger via the `log_value` mechanism.
-            𝒮.post_train_callback(𝒟, training_info=training_info, info=info, 𝒮=𝒮)
-            # Log the results
-            log(𝒮.log, 𝒮.i + 1:𝒮.i + 𝒮.ΔN, training_info, info, 𝒮=𝒮)
-        end
+        run_training_loop!(𝒮, 𝒟, s)
     else
         # Parallel: deep-copy MDP per env, give each sampler an independent
         # RNG (seeded `Xoshiro(env_seed + 1000*e)` for reproducibility, or
         # `Xoshiro()` when `env_seed === nothing`). ΔN must split evenly
-        # across envs — each env collects Nsteps_per_env steps.
-        @assert 𝒮.ΔN % 𝒮.num_envs == 0 "ΔN ($(𝒮.ΔN)) must be divisible by num_envs ($(𝒮.num_envs))"
-        Nsteps_per_env = 𝒮.ΔN ÷ 𝒮.num_envs
+        # across envs — `steps!(samplers, …)` asserts this.
         samplers = [Sampler(deepcopy(mdp), 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns,
                             λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc,
                             rng=mkrng(1000 * e))
                     for e in 1:𝒮.num_envs]
-        # Dedicated eval sampler to allow to carry state across rollouts
-        if isnothing(𝒮.log.sampler)
-            𝒮.log.sampler = Sampler(deepcopy(mdp), 𝒮.agent, S=𝒮.S,
-                                    max_steps=𝒮.max_steps,
-                                    rng=mkrng(999_999))
-        end
-        log(𝒮.log, 𝒮.i, 𝒮=𝒮)
-        for 𝒮.i = range(𝒮.i, stop=𝒮.i + 𝒮.N - 𝒮.ΔN, step=𝒮.ΔN)
-            info = Dict()
-            steps!(samplers, 𝒟, Nsteps_per_env=Nsteps_per_env, explore=true, i=𝒮.i,
-                   store=𝒮.interaction_storage,
-                   cb=(D) -> 𝒮.post_sample_callback(D, info=info, 𝒮=𝒮), reset=true)
-            𝒮.post_batch_callback(𝒟, info=info, 𝒮=𝒮)
-            training_info = policy_gradient_training(𝒮, 𝒟)
-            𝒮.post_train_callback(𝒟, training_info=training_info, info=info, 𝒮=𝒮)
-            log(𝒮.log, 𝒮.i + 1:𝒮.i + 𝒮.ΔN, training_info, info, 𝒮=𝒮)
-        end
+        run_training_loop!(𝒮, 𝒟, samplers)
     end
     𝒮.i += 𝒮.ΔN
     𝒮.agent.π
 end
 
+
+# Shared training loop: logs pre-train performance, then iterates rollout →
+# callbacks → training → callbacks → log. Dispatch on `s` (Sampler vs
+# Vector{<:Sampler}) routes the `steps!` call to the serial or batched-parallel
+# implementation. Caller is responsible for setting `𝒮.log.sampler` (the eval
+# sampler) before calling.
+function run_training_loop!(𝒮::OnPolicySolver, 𝒟, s)
+    # Log the pre-train performance
+    log(𝒮.log, 𝒮.i, 𝒮=𝒮)
+    # Loop over the desired number of environment interactions
+    for 𝒮.i = range(𝒮.i, stop=𝒮.i + 𝒮.N - 𝒮.ΔN, step=𝒮.ΔN)
+        # Info to collect during training
+        info = Dict()
+        # Sample transitions into the batch buffer
+        steps!(s, 𝒟, Nsteps=𝒮.ΔN, explore=true, i=𝒮.i, store=𝒮.interaction_storage,
+               cb=(D) -> 𝒮.post_sample_callback(D, info=info, 𝒮=𝒮), reset=true)
+        # Post-batch callback, often used for additional training
+        𝒮.post_batch_callback(𝒟, info=info, 𝒮=𝒮)
+        # Train the networks
+        training_info = policy_gradient_training(𝒮, 𝒟)
+        # Post-train callback — fires AFTER training so `training_info`
+        # (actor_loss, critic_loss, kl, entropy, clip_fraction, grad norms,
+        # advantage, returns) is available. Use this hook to log per-iteration
+        # metrics from external systems (e.g. Wandb) instead of intercepting
+        # the internal TBLogger via the `log_value` mechanism.
+        𝒮.post_train_callback(𝒟, training_info=training_info, info=info, 𝒮=𝒮)
+        # Log the results
+        log(𝒮.log, 𝒮.i + 1:𝒮.i + 𝒮.ΔN, training_info, info, 𝒮=𝒮)
+    end
+end

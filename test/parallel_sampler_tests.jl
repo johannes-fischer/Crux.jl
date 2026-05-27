@@ -65,7 +65,7 @@ const SEED = 12345
 const SDIM = 2
 const ADIM = 1
 const HIDDEN = 16
-const N_STEPS = 32      # buffer length per rollout (parallel: Nsteps_per_env)
+const N_STEPS = 32      # buffer length per rollout per env (parallel total: N_STEPS * num_envs)
 const MAX_STEPS = 50
 
 function build_policy(seed::Int; move_to_gpu::Bool = false)
@@ -126,7 +126,7 @@ function run_equivalence_test(; on_gpu::Bool)
                                  λ = λ_gae, max_steps = MAX_STEPS,
                                  rng = Xoshiro(SEED + 999))
     samplers_par = [sampler_par_1, sampler_par_2]
-    data_par = Crux.steps!(samplers_par; Nsteps_per_env = N_STEPS, explore = true,
+    data_par = Crux.steps!(samplers_par; Nsteps = N_STEPS * length(samplers_par), explore = true,
                            i = 0, reset = true)
 
     slice1 = 1:N_STEPS
