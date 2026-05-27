@@ -20,6 +20,16 @@
     # Trajectory-level measurements
     traj_weight_fn=nothing # weight of the trajectory
 
+    # Per-sampler RNG. Used by `rand(initialstate)` in reset_sampler!, by
+    # `@gen` in step!, and (when explicitly passed) by GaussianPolicy
+    # exploration noise. Default `Random.default_rng()` preserves current
+    # behavior (task-local RNG, the same source as a bare `randn(…)`).
+    # The parallel sampler constructs N samplers with N distinct seeded
+    # RNGs so per-env trajectories are reproducible regardless of thread
+    # scheduling, and so each env's slice is bit-equivalent to a single-env
+    # run with the same seed.
+    rng::Random.AbstractRNG = Random.default_rng()
+
     # Episodes whose advantage/return/etc. columns are still to be filled.
     # Populated by `terminate_episode!` and `flush_open_episode!`, drained
     # by `drain_pending_episodes!` once per rollout — this lets us batch
@@ -43,7 +53,7 @@ function reset_sampler!(sampler::Sampler)
 
     new_ep_reset!(sampler.agent.π)
 
-    sampler.s = rand(initialstate(sampler.mdp))
+    sampler.s = rand(sampler.rng, initialstate(sampler.mdp))
     sampler.svec = tovec(initial_observation(sampler.mdp, sampler.s), sampler.S)
     sampler.episode_length = 0
     sampler.was_reset=true
@@ -114,9 +124,46 @@ function drain_pending_episodes!(sampler::Sampler, data)
     empty!(sampler.pending_episodes)
 end
 
-function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
-    sampler.was_reset=false
-    a, logprob = explore ? exploration(sampler.agent.π_explore, sampler.svec, π_on=sampler.agent.π, i=i) : (action(sampler.agent.π, sampler.svec), NaN)
+# Multi-sampler drain: ONE whole-buffer V() call per network for the entire
+# parallel rollout, regardless of how many envs and episodes the buffer holds.
+function drain_pending_episodes!(samplers::AbstractVector{<:Sampler}, data)
+    any_pending = any(!isempty(s.pending_episodes) for s in samplers)
+    any_pending || return
+    # models are shared across samplers by construction
+    π = samplers[1].agent.π
+    Vc = samplers[1].Vc
+    λ = samplers[1].λ
+    γ = samplers[1].γ
+    need_value = haskey(data, :advantage)
+    need_cost  = haskey(data, :cost_advantage)
+    Vs_all  = need_value ? vec(cpu(value(π, data[:s])))  : nothing
+    Vsp_all = need_value ? vec(cpu(value(π, data[:sp]))) : nothing
+    Vcs_all  = need_cost ? vec(cpu(value(Vc, data[:s])))  : nothing
+    Vcsp_all = need_cost ? vec(cpu(value(Vc, data[:sp]))) : nothing
+    for sampler in samplers, ep in sampler.pending_episodes
+        need_value && fill_gae_from_arrays!(data, ep, Vs_all, Vsp_all, λ, γ; value_col=:value)
+        haskey(data, :return) && fill_returns!(data, ep, γ)
+        haskey(data, :fwd_importance_weight) && fill_fwd_importance_weight!(data, ep)
+        haskey(data, :cum_importance_weight) && fill_cum_importance_weight!(data, ep)
+        haskey(data, :rev_importance_weight) && fill_rev_importance_weight!(data, ep)
+        haskey(data, :traj_importance_weight) && (data[:traj_importance_weight][1,ep] .= sampler.traj_weight_fn(sampler.agent, data, ep))
+        need_cost && fill_gae_from_arrays!(data, ep, Vcs_all, Vcsp_all, λ, γ; source=:cost, target=:cost_advantage, value_col=:cost_value)
+        haskey(data, :cost_return) && fill_returns!(data, ep, γ; source=:cost, target=:cost_return)
+    end
+    foreach(s -> empty!(s.pending_episodes), samplers)
+end
+
+function step!(data, j::Int, sampler::Sampler; explore::Bool=false, i::Int=0)
+    a, logprob = explore ?
+        exploration(sampler.agent.π_explore, sampler.svec;
+                    π_on=sampler.agent.π, i=i, rng=sampler.rng) :
+        (action(sampler.agent.π, sampler.svec), NaN)
+    step_with_action!(data, j, sampler, a, logprob; i=i, explore=explore)
+end
+
+function step_with_action!(data, j::Int, sampler::Sampler, a, logprob;
+                           i::Int=0, explore::Bool=false)
+    sampler.was_reset = false
     (a isa AbstractArray || a isa Tuple) && length(a) == 1 && (a = a[1])
 
     # This implements the ability to get cost information from safety gym
@@ -125,7 +172,10 @@ function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
 
     args = (a,)
     if !isnothing(sampler.adversary)
-        x, xlogprob = explore ? exploration(sampler.adversary.π_explore, sampler.svec, π_on=sampler.adversary.π, i=i) : (action(sampler.adversary.π, sampler.svec), NaN)
+        x, xlogprob = explore ?
+            exploration(sampler.adversary.π_explore, sampler.svec;
+                        π_on=sampler.adversary.π, i=i, rng=sampler.rng) :
+            (action(sampler.adversary.π, sampler.svec), NaN)
         (x isa AbstractArray || x isa Tuple) && length(x) == 1 && (x = x[1]) # disturbances always come out as an array
         data[:x][:, j:j] .= tovec(x, sampler.adversary.space)
         haskey(data, :xlogprob) && (data[:xlogprob][:, j] .= xlogprob)
@@ -133,10 +183,10 @@ function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
     end
 
     if sampler.mdp isa POMDP
-        sp, o, r = @gen(:sp,:o,:r)(sampler.mdp, sampler.s, args...; kwargs...)
+        sp, o, r = @gen(:sp,:o,:r)(sampler.mdp, sampler.s, args..., sampler.rng; kwargs...)
         spvec = convert_o(AbstractArray, o, sampler.mdp)
     else
-        sp, r = @gen(:sp,:r)(sampler.mdp, sampler.s, args...; kwargs...)
+        sp, r = @gen(:sp,:r)(sampler.mdp, sampler.s, args..., sampler.rng; kwargs...)
         spvec = convert_s(AbstractArray, sp, sampler.mdp)
     end
     spvec = tovec(spvec, sampler.S)
@@ -156,9 +206,9 @@ function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
         data[:importance_weight][:, j] .= exp.(nom_logprob .- logprob)
     end
     haskey(data, :t) && (data[:t][1, j] = sampler.episode_length + 1)
-    haskey(data, :i) && (data[:i][1, j] = i+1)
-    haskey(data, :cost) && (data[:cost][1,j] = info["cost"])
-    haskey(data, :grasp_success) && (data[:grasp_success][1,j] = info["grasp_success"])
+    haskey(data, :i) && (data[:i][1, j] = i + 1)
+    haskey(data, :cost) && (data[:cost][1, j] = info["cost"])
+    haskey(data, :grasp_success) && (data[:grasp_success][1, j] = info["grasp_success"])
     if haskey(data, :z) && haskey(info, "z")
         z = info["z"]
         if sampler.agent.π isa LatentConditionedNetwork
@@ -170,7 +220,7 @@ function step!(data, j::Int, sampler::Sampler; explore=false, i=0)
         end
         data[:z][:, j] = z
     end
-    haskey(data, :fail) && (data[:fail][1,j] = extra_functions["isfailure"](sampler.mdp, sp)) #TODO Changed this to "s" instead of "sp" for the continuum world
+    haskey(data, :fail) && (data[:fail][1, j] = extra_functions["isfailure"](sampler.mdp, sp)) #TODO Changed this to "s" instead of "sp" for the continuum world
 
     # Cut the episode short if needed
     sampler.episode_length += 1
@@ -184,6 +234,8 @@ end
 
 function steps!(sampler::Sampler, buffer=nothing; store=nothing, cb=(kwargs...)->nothing, Nsteps=1, explore=false, i=0, reset=false, return_episodes=false, return_at_episode_end=false)
     data = mdp_data(sampler.S, sampler.agent.space, Nsteps, sampler.required_columns)
+    # Defensive pre-clear: the end-of-call drain normally leaves pending_episodes empty
+    empty!(sampler.pending_episodes)
     for j=1:Nsteps
         step!(data, j, sampler, explore=explore, i=i + (j-1))
         if return_at_episode_end && sampler.episode_length == 0
@@ -208,38 +260,82 @@ function steps!(sampler::Sampler, buffer=nothing; store=nothing, cb=(kwargs...)-
     return_episodes ? (data, episodes(data)) : data
 end
 
-# BROKEN — DO NOT USE. Scheduled for replacement by the threaded parallel
-# sampler that's part of the in-progress num_envs work. Three issues:
-#   1. Line `reset && terminate_episode!(sampler, data, Nsteps)` references
-#      `sampler`, but that name only exists inside the inner `for sampler
-#      in samplers` loop whose scope ends at the `end` above — so `reset=true`
-#      hits an `UndefVarError`.
-#   2. Round-robin write layout: env-e's transitions land at non-contiguous
-#      slot indices (e, N+e, 2N+e, …). `fill_gae!` / `fill_gae_from_arrays!`
-#      assume an episode is a *contiguous* `UnitRange{Int}` of buffer slots,
-#      so even if (1) were fixed, GAE would be computed over wrong slot sets.
-#   3. No threading despite the function name implying parallelism — each
-#      env-step runs sequentially on the main thread, so there's no
-#      throughput benefit even when the math would line up.
-# The replacement will: deep-copy mdps per env, batch the policy forward on
-# the main thread, `Threads.@threads` over the env-stepping inner loop, use
-# per-env-contiguous buffer layout, and drain pending episodes with a single
-# whole-buffer V() call (sharing `drain_pending_episodes!` with single-env).
-function steps!(samplers::Vector{T}, buffer=nothing; store=nothing, cb=(kwargs...)->nothing, Nsteps=1, explore=false, i=0, reset=false, return_episodes = false) where {T<:Sampler}
-    data = mdp_data(samplers[1].S, samplers[1].agent.space, Nsteps*length(samplers), samplers[1].required_columns)
-    j = 1
-    for s=1:Nsteps
-        for sampler in samplers
-            step!(data, j, sampler, explore = explore, i = i + (j-1))
-            j += 1
+# Gather svec from N samplers into a (D, N) matrix and run one batched policy
+# forward. When `explore=true` uses per-env RNGs via `batched_exploration` so
+# env e's action sequence is reproducible from its rng seed; when false, runs
+# the deterministic `action(π, S)` and returns a stub `(1, N)` NaN logprob row.
+function batched_policy_forward(samplers::AbstractVector{<:Sampler},
+                                rngs::AbstractVector{<:Random.AbstractRNG},
+                                explore::Bool)
+    S_batched = reduce(hcat, (s.svec for s in samplers))
+    if explore
+        return batched_exploration(samplers[1].agent.π_explore, S_batched, rngs)
+    else
+        a = action(samplers[1].agent.π, S_batched)
+        lp = fill(NaN32, 1, length(samplers))
+        return a, lp
+    end
+end
+
+# Parallel sampler: env stepping threaded via `Threads.@threads`, one batched
+# policy forward per timestep on the main thread. Per-env-contiguous layout
+# (env e owns slots `(e-1)*Nsteps_per_env + 1 : e*Nsteps_per_env`) keeps each
+# env's episodes as contiguous `UnitRange{Int}`s for `fill_gae_from_arrays!`.
+# Each sampler owns its deep-copied MDP and a seeded `Xoshiro` (built in
+# `solve(::OnPolicySolver, mdp)` from `env_seed`) for reproducibility
+# independent of thread schedule.
+#
+# Parallel-mode limitations — `step_with_action!` runs as-is in each thread;
+# the only paths inside it that mutate state SHARED across samplers and
+# therefore race are:
+#   - `LatentConditionedNetwork` actor: writes to `sampler.agent.π.z` in
+#     `reset_sampler!` and in the `:z` column branch.
+#   - First write to the `:z` column: `data[:z] = fill(…)` reassigns a Dict
+#     entry from multiple threads at once.
+# Everything else (adversary forward, `:importance_weight`'s `logpdf`, plain
+# `:cost` / `:grasp_success` / `:fail` writes, `new_ep_reset!` for non-Latent
+# policies) is read-only on shared state and safe to run concurrently.
+function steps!(samplers::Vector{T}, buffer=nothing; store=nothing,
+                cb=(kwargs...)->nothing, Nsteps_per_env::Int=1, explore=false,
+                i=0, reset=false, return_episodes=false) where {T<:Sampler}
+    N = length(samplers)
+    @assert N >= 1 "need at least one sampler"
+    Nsteps_total = Nsteps_per_env * N
+    data = mdp_data(samplers[1].S, samplers[1].agent.space, Nsteps_total,
+                    samplers[1].required_columns)
+    # Sampler bookkeeping invariant: episode_length starts at 0 on each rollout
+    # (either fresh from construction or because the previous rollout's
+    # slice-end flush_open_episode! reset it).
+    @assert all(s.episode_length == 0 for s in samplers) "parallel steps! requires episode_length==0 on entry"
+    foreach(s -> empty!(s.pending_episodes), samplers)
+    rngs = [s.rng for s in samplers]
+
+    for j in 1:Nsteps_per_env
+        # 1. Gather + ONE batched policy forward on the main thread. With
+        #    Crux's CPU-svec + roundtripping-mdcall convention, network forwards
+        #    return CPU results regardless of where the policy weights live,
+        #    so A_batched / LP_batched are CPU here.
+        A_batched, LP_batched = batched_policy_forward(samplers, rngs, explore)
+        # 2. Threaded env stepping. Each thread touches only its own sampler
+        #    and its own slot range in `data`, so no synchronization needed.
+        Threads.@threads for e in 1:N
+            slot = (e - 1) * Nsteps_per_env + j
+            step_with_action!(data, slot, samplers[e],
+                              bslice(A_batched, e:e), LP_batched[1, e]; i=i + (j-1))
         end
     end
-    reset && terminate_episode!(sampler, data, Nsteps)
 
-    cb(data) # Run the callback on the dataset before adding it
-    !isnothing(store) && push!(store, data) # add it to the storage array if provided
-    !isnothing(buffer) && push!(buffer, data) # Push it to the provided buffer
+    # 4. Slice-end carry-state flush per env (parallel-equivalent of single-env's
+    #    `reset && flush_open_episode!(sampler, data, Nsteps)` one-liner).
+    reset && map(e -> flush_open_episode!(samplers[e], data, e * Nsteps_per_env), 1:N)
 
+    # 5. One whole-buffer V() pass to fill advantage/return/value for all
+    #    pending episodes across all envs.
+    drain_pending_episodes!(samplers, data)
+
+    cb(data)
+    !isnothing(store)  && push!(store, data)
+    !isnothing(buffer) && push!(buffer, data)
     return_episodes ? (data, episodes(data)) : data
 end
 

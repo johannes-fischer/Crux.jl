@@ -141,10 +141,31 @@ logits(π::DiscreteNetwork, s) = π.logit_conversion(π, s)
 
 categorical_logpdf(probs, a_oh) = log.(sum(probs .* a_oh, dims=1))
 
-function exploration(π::DiscreteNetwork, s; kwargs...)
+function exploration(π::DiscreteNetwork, s; rng=nothing, kwargs...)
     ps = logits(π, s)
-    ai = mapslices((v) -> rand(Categorical(v)), ps, dims=1)
+    # `rand(rng, Categorical(v))` falls back to default_rng when rng=nothing —
+    # behavior identical to the prior unkwarged call.
+    sampler_fn = isnothing(rng) ? ((v) -> rand(Categorical(v))) :
+                                  ((v) -> rand(rng, Categorical(v)))
+    ai = mapslices(sampler_fn, ps, dims=1)
     a = π.outputs[ai]
+    a, categorical_logpdf(ps, Flux.onehotbatch(π, a))
+end
+
+# this is only needed to have per-env rng
+function batched_exploration(π::DiscreteNetwork, S::AbstractMatrix,
+                             rngs::AbstractVector{<:Random.AbstractRNG};
+                             kwargs...)
+    ps = logits(π, S)                  # (n_actions, N) — CPU via mdcall round-trip
+    N = size(ps, 2)
+    @assert length(rngs) == N
+    # Sample per-env categorical: pair each env's rng with its column of ps via
+    # zip(rngs, eachcol(ps)). `Vector(v)` materializes the column view —
+    # Distributions.Categorical rejects SubArray as its prob vector.
+    a_vec = [π.outputs[rand(rng, Categorical(Vector(v)))]
+             for (rng, v) in zip(rngs, eachcol(ps))]
+    # Convert to the (1, N) action row PPO expects.
+    a = reshape(a_vec, 1, N)
     a, categorical_logpdf(ps, Flux.onehotbatch(π, a))
 end
 
@@ -215,7 +236,7 @@ POMDPs.action(π::MixtureNetwork, s) = exploration(π, s)[1]
 
 function exploration(π::MixtureNetwork, s; kwargs...)
     αs = π.weights(s)
-    indices = ignore_derivatives() do 
+    indices = ignore_derivatives() do
 		αi = mapslices(α -> rand(Categorical(α)), αs, dims=1)[:]
 		indices = []
 		for i=1:length(π.networks)
@@ -225,29 +246,29 @@ function exploration(π::MixtureNetwork, s; kwargs...)
 	end
     println("weights: ", αs, "indices: ", indices)
     a = hcat([exploration(d, s[:, i])[1] for (d, i) in zip(π.networks, indices)]...)
-    
+
     return a, logpdf(π, s, a)
 end
 
 function Distributions.logpdf(π::MixtureNetwork, s, a)
     α = π.weights(s)
-    
+
     x = log.(sum([α[i] .* exp.(logpdf(p, s, a)) for (i, p) in enumerate(π.networks)]))
-    
+
     # x = vcat([logpdf(p, s, a) for p in π.networks]...)
     # weighted_logsumexp(x, α)
 end
 
 Distributions.entropy(π::MixtureNetwork, s) = @error "Entropy not defined"
 
-function action_space(π::MixtureNetwork) 
+function action_space(π::MixtureNetwork)
     action_space(π.networks[1])
 end
 
 
 ## Actor Critic Architecture
 mutable struct ActorCritic{TA,TC} <: NetworkPolicy
-    A::TA # actor 
+    A::TA # actor
     C::TC # critic
 end
 
@@ -264,6 +285,9 @@ POMDPs.value(π::ActorCritic, s, a) = value(π.C, s, a)
 POMDPs.action(π::ActorCritic, s) = action(π.A, s)
 
 exploration(π::ActorCritic, s; kwargs...) = exploration(π.A, s; kwargs...)
+
+batched_exploration(π::ActorCritic, S, rngs; kwargs...) =
+    batched_exploration(π.A, S, rngs; kwargs...)
 
 Distributions.logpdf(π::ActorCritic, s, a) = logpdf(π.A, s, a)
 
@@ -332,10 +356,27 @@ function gaussian_logpdf(μ, logΣ, a)
     sum(-((a .- μ) .^ 2) ./ (2 .* σ²) .- 0.9189385332046727f0 .- logΣ, dims=1) # 0.9189385332046727f0 = log(sqrt(2π))
 end
 
-function exploration(π::GaussianPolicy, s; kwargs...)
+function exploration(π::GaussianPolicy, s; rng=nothing, kwargs...)
     μ, logΣ = π.μ(s), π.logΣ(s)
     σ = exp.(logΣ)
-    ϵ = ignore_derivatives(() -> randn(Float32, size(μ)...) |> device(s))
+    ϵ = if isnothing(rng)
+        ignore_derivatives(() -> randn(Float32, size(μ)...) |> device(s))
+    else
+        ignore_derivatives(() -> randn(rng, Float32, size(μ)...) |> device(s))
+    end
+    a = ϵ .* σ .+ μ
+    a, gaussian_logpdf(μ, logΣ, a)
+end
+
+function batched_exploration(π::GaussianPolicy, S::AbstractMatrix,
+                             rngs::AbstractVector{<:Random.AbstractRNG};
+                             kwargs...)
+    μ, logΣ = π.μ(S), π.logΣ(S)
+    σ = exp.(logΣ)
+    D_a, N = size(μ)
+    @assert length(rngs) == N "expected $(N) rngs, got $(length(rngs))"
+    ϵ = ignore_derivatives(() ->
+        mapreduce(rng -> randn(rng, Float32, D_a), hcat, rngs) |> device(S))
     a = ϵ .* σ .+ μ
     a, gaussian_logpdf(μ, logΣ, a)
 end
@@ -374,7 +415,7 @@ function squashed_gaussian_σ(logΣ)
     exp.(logΣ)
 end
 
-# a is  untanh'd 
+# a is  untanh'd
 function squashed_gaussian_logprob(μ, logΣ, a)
     σ² = squashed_gaussian_σ(logΣ) .^ 2
     sum(-((a .- μ) .^ 2) ./ (2 .* σ²) .- 0.9189385332046727f0 .- logΣ .- 2 * (log(2.0f0) .- a .- softplus.(-2 .* a)), dims=1)
@@ -384,6 +425,19 @@ function exploration(π::SquashedGaussianPolicy, s; kwargs...)
     μ, logΣ = π.μ(s), π.logΣ(s)
     σ = squashed_gaussian_σ(logΣ)
     ϵ = ignore_derivatives(() -> randn(Float32, size(μ)...) |> device(s))
+    a_pretanh = ϵ .* σ .+ μ
+    π.ascale .* tanh.(a_pretanh), squashed_gaussian_logprob(μ, logΣ, a_pretanh)
+end
+
+function batched_exploration(π::SquashedGaussianPolicy, S::AbstractMatrix,
+                             rngs::AbstractVector{<:Random.AbstractRNG};
+                             kwargs...)
+    μ, logΣ = π.μ(S), π.logΣ(S)
+    σ = squashed_gaussian_σ(logΣ)
+    D_a, N = size(μ)
+    @assert length(rngs) == N
+    ϵ = ignore_derivatives(() ->
+        mapreduce(rng -> randn(rng, Float32, D_a), hcat, rngs) |> device(S))
     a_pretanh = ϵ .* σ .+ μ
     π.ascale .* tanh.(a_pretanh), squashed_gaussian_logprob(μ, logΣ, a_pretanh)
 end
