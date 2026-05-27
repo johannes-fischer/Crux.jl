@@ -140,12 +140,17 @@ function run_training_loop!(𝒮::OnPolicySolver, 𝒟, s)
         # Info to collect during training
         info = Dict()
         # Sample transitions into the batch buffer
+        t_sample_ns = time_ns()
         steps!(s, 𝒟, Nsteps=𝒮.ΔN, explore=true, i=𝒮.i, store=𝒮.interaction_storage,
                cb=(D) -> 𝒮.post_sample_callback(D, info=info, 𝒮=𝒮), reset=true)
+        info[:t_sample_seconds]       = (time_ns() - t_sample_ns) / 1e9
+        info[:n_steps_in_batch] = 𝒮.ΔN
         # Post-batch callback, often used for additional training
         𝒮.post_batch_callback(𝒟, info=info, 𝒮=𝒮)
         # Train the networks
+        t_train_ns = time_ns()
         training_info = policy_gradient_training(𝒮, 𝒟)
+        info[:t_train_seconds] = (time_ns() - t_train_ns) / 1e9
         # Post-train callback — fires AFTER training so `training_info`
         # (actor_loss, critic_loss, kl, entropy, clip_fraction, grad norms,
         # advantage, returns) is available. Use this hook to log per-iteration
