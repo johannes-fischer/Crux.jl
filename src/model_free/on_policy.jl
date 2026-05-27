@@ -16,7 +16,11 @@ Fields
 - `𝒫::NamedTuple = (;)` Parameters of the algorithm
 - `interaction_storage = nothing` If this is initialized to an array then it will store all interactions
 - `post_sample_callback = (𝒟; kwargs...) -> nothing` Callback that that happens after sampling experience
-- `post_batch_callback = (𝒟; kwargs...) -> nothing` Callback that that happens after sampling a batch
+- `post_batch_callback = (𝒟; kwargs...) -> nothing` Callback that that happens after sampling a batch (before training)
+- `post_train_callback = (𝒟; kwargs...) -> nothing` Callback that runs after training each iteration.
+    Receives `training_info::Dict` (actor_loss, critic_loss, kl, entropy, clip_fraction, grad_norms, advantage,
+    return, …) and `info::Dict` (rollout-buffer stats). Use this to log per-iteration metrics without
+    intercepting the internal TBLogger.
 
 On-policy-specific parameters
 ======
@@ -42,7 +46,8 @@ Parameters specific to cost constraints (a separate value network)
     𝒫::NamedTuple = (;) # Parameters of the algorithm
     interaction_storage = nothing # If this is initialized to an array then it will store all interactions
     post_sample_callback = (𝒟; kwargs...) -> nothing # Callback that that happens after sampling experience
-    post_batch_callback = (𝒟; kwargs...) -> nothing # Callback that that happens after sampling a batch
+    post_batch_callback = (𝒟; kwargs...) -> nothing # Callback that that happens after sampling a batch (BEFORE training)
+    post_train_callback = (𝒟; kwargs...) -> nothing # Callback after training — receives training_info (loss/grad/kl/entropy) + info (rollout stats)
 
     # On-policy-specific parameters
     λ_gae::Float32 = 0.95 # Generalized advantage estimation parameter
@@ -117,6 +122,12 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
             𝒮.post_batch_callback(𝒟, info=info, 𝒮=𝒮)
             # Train the networks
             training_info = policy_gradient_training(𝒮, 𝒟)
+            # Post-train callback — fires AFTER training so `training_info`
+            # (actor_loss, critic_loss, kl, entropy, clip_fraction, grad norms,
+            # advantage, returns) is available. Use this hook to log per-iteration
+            # metrics from external systems (e.g. Wandb) instead of intercepting
+            # the internal TBLogger via the `log_value` mechanism.
+            𝒮.post_train_callback(𝒟, training_info=training_info, info=info, 𝒮=𝒮)
             # Log the results
             log(𝒮.log, 𝒮.i + 1:𝒮.i + 𝒮.ΔN, training_info, info, 𝒮=𝒮)
         end
@@ -145,6 +156,7 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
                    cb=(D) -> 𝒮.post_sample_callback(D, info=info, 𝒮=𝒮), reset=true)
             𝒮.post_batch_callback(𝒟, info=info, 𝒮=𝒮)
             training_info = policy_gradient_training(𝒮, 𝒟)
+            𝒮.post_train_callback(𝒟, training_info=training_info, info=info, 𝒮=𝒮)
             log(𝒮.log, 𝒮.i + 1:𝒮.i + 𝒮.ΔN, training_info, info, 𝒮=𝒮)
         end
     end
