@@ -112,14 +112,43 @@ function drain_pending_episodes!(sampler::Sampler, data)
     Vcsp_all = need_cost ? vec(cpu(value(sampler.Vc, data[:sp]))) : nothing
     for ep in sampler.pending_episodes
         need_value && fill_gae_from_arrays!(data, ep, Vs_all, Vsp_all, sampler.λ, sampler.γ; value_col=:value)
-        haskey(data, :return) && fill_returns!(data, ep, sampler.γ)
+        # ──────────────────────────────────────────────────────────────────────
+        # `:return` computation: fix for the Pardo et al. (2018) "Time Limits in
+        # Reinforcement Learning" issue.
+        #
+        # Naive `fill_returns!` sums empirical discounted rewards from t to the
+        # LAST step of the episode, with no bootstrap. For truncated episodes
+        # (max_steps cutoff or slice-end carry, done=False on the last step),
+        # this misses the V(s_T) continuation value: the critic gets a TARGET
+        # biased toward 0 at the truncation boundary, propagating backward via
+        # γ and biasing the entire value function low.
+        #
+        # CleanRL fix (`returns = advantages + values` in cleanrl/ppo*.py):
+        # `fill_gae_from_arrays!` ABOVE already used (1 - done) so the GAE
+        # advantage correctly distinguishes termination (done=True, no
+        # bootstrap) from truncation (done=False, V(s_T) bootstrap). Setting
+        # the value target to (advantage + value) inherits that bootstrap-
+        # correctness exactly. Standard PPO recipe in cleanrl / SB3 / 37-details.
+        #
+        # Falls back to `fill_returns!` when GAE columns aren't present (e.g.
+        # DQN-style N-step empirical-return solvers that don't use GAE).
+        # ──────────────────────────────────────────────────────────────────────
+        if haskey(data, :return) && need_value && haskey(data, :value)
+            @views data[:return][1, ep] .= data[:advantage][1, ep] .+ data[:value][1, ep]
+        elseif haskey(data, :return)
+            fill_returns!(data, ep, sampler.γ)
+        end
         haskey(data, :fwd_importance_weight) && fill_fwd_importance_weight!(data, ep)
         haskey(data, :cum_importance_weight) && fill_cum_importance_weight!(data, ep)
         haskey(data, :rev_importance_weight) && fill_rev_importance_weight!(data, ep)
         haskey(data, :traj_importance_weight) && (data[:traj_importance_weight][1,ep] .= sampler.traj_weight_fn(sampler.agent, data, ep))
-        # Dealing with cost constraints
+        # Dealing with cost constraints — same Pardo fix applied to cost critic.
         need_cost && fill_gae_from_arrays!(data, ep, Vcs_all, Vcsp_all, sampler.λ, sampler.γ; source=:cost, target=:cost_advantage, value_col=:cost_value)
-        haskey(data, :cost_return) && fill_returns!(data, ep, sampler.γ; source=:cost, target=:cost_return)
+        if haskey(data, :cost_return) && need_cost && haskey(data, :cost_value)
+            @views data[:cost_return][1, ep] .= data[:cost_advantage][1, ep] .+ data[:cost_value][1, ep]
+        elseif haskey(data, :cost_return)
+            fill_returns!(data, ep, sampler.γ; source=:cost, target=:cost_return)
+        end
     end
     empty!(sampler.pending_episodes)
 end
@@ -142,13 +171,22 @@ function drain_pending_episodes!(samplers::AbstractVector{<:Sampler}, data)
     Vcsp_all = need_cost ? vec(cpu(value(Vc, data[:sp]))) : nothing
     for sampler in samplers, ep in sampler.pending_episodes
         need_value && fill_gae_from_arrays!(data, ep, Vs_all, Vsp_all, λ, γ; value_col=:value)
-        haskey(data, :return) && fill_returns!(data, ep, γ)
+        # Pardo fix: returns = advantage + value (see single-sampler drain above for rationale).
+        if haskey(data, :return) && need_value && haskey(data, :value)
+            @views data[:return][1, ep] .= data[:advantage][1, ep] .+ data[:value][1, ep]
+        elseif haskey(data, :return)
+            fill_returns!(data, ep, γ)
+        end
         haskey(data, :fwd_importance_weight) && fill_fwd_importance_weight!(data, ep)
         haskey(data, :cum_importance_weight) && fill_cum_importance_weight!(data, ep)
         haskey(data, :rev_importance_weight) && fill_rev_importance_weight!(data, ep)
         haskey(data, :traj_importance_weight) && (data[:traj_importance_weight][1,ep] .= sampler.traj_weight_fn(sampler.agent, data, ep))
         need_cost && fill_gae_from_arrays!(data, ep, Vcs_all, Vcsp_all, λ, γ; source=:cost, target=:cost_advantage, value_col=:cost_value)
-        haskey(data, :cost_return) && fill_returns!(data, ep, γ; source=:cost, target=:cost_return)
+        if haskey(data, :cost_return) && need_cost && haskey(data, :cost_value)
+            @views data[:cost_return][1, ep] .= data[:cost_advantage][1, ep] .+ data[:cost_value][1, ep]
+        elseif haskey(data, :cost_return)
+            fill_returns!(data, ep, γ; source=:cost, target=:cost_return)
+        end
     end
     foreach(s -> empty!(s.pending_episodes), samplers)
 end
