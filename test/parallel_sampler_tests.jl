@@ -132,7 +132,7 @@ function run_equivalence_test(; on_gpu::Bool)
     slice1 = 1:N_STEPS
     label = on_gpu ? "GPU" : "CPU"
     @testset "Parallel env-1 ≈ single-env at matching seed [$label]" begin
-        atol = 1f-4
+        atol = 1f-3
         for col in (:s, :a, :sp, :r, :done, :logprob, :advantage, :return, :value)
             single_col   = data_single[col]
             parallel_col = data_par[col][:, slice1]

@@ -97,8 +97,13 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
     mkrng(offset) = isnothing(𝒮.env_seed) ? Random.Xoshiro() : Random.Xoshiro(𝒮.env_seed + offset)
 
     if 𝒮.num_envs == 1
-        s = Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns, λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc)
-        isnothing(𝒮.log.sampler) && (𝒮.log.sampler = s)
+        s = Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns, λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc, rng=mkrng(1000))
+        # Dedicated eval sampler to allow to carry state across rollouts
+        if isnothing(𝒮.log.sampler)
+            𝒮.log.sampler = Sampler(deepcopy(mdp), 𝒮.agent, S=𝒮.S,
+                                    max_steps=𝒮.max_steps,
+                                    rng=mkrng(999_999))
+        end
         # Log the pre-train performance
         log(𝒮.log, 𝒮.i, 𝒮=𝒮)
         # Loop over the desired number of environment interactions
@@ -126,8 +131,7 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
                             λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc,
                             rng=mkrng(1000 * e))
                     for e in 1:𝒮.num_envs]
-        # Dedicated eval sampler (see single-env branch comment). Seeded
-        # offset 999_999 stays well clear of the per-env 1000, 2000, … seeds.
+        # Dedicated eval sampler to allow to carry state across rollouts
         if isnothing(𝒮.log.sampler)
             𝒮.log.sampler = Sampler(deepcopy(mdp), 𝒮.agent, S=𝒮.S,
                                     max_steps=𝒮.max_steps,
