@@ -94,15 +94,17 @@ function flush_open_episode!(sampler::Sampler, data, j)
     sampler.episode_length = 0
 end
 
-# Fill advantage/return/value/importance-weight/cost columns for every
-# episode whose range was pushed to `sampler.pending_episodes` during this
-# rollout. V() is evaluated ONCE over the whole buffer per network (so two
-# forwards for the reward critic, two more for Vc when costs are enabled),
-# regardless of how many episodes the buffer contains. This is the only
-# place fill_gae!-style work happens for the parallel-compatible path; the
-# per-episode public `fill_gae!(d, ep, V, …)` API is kept for external
-# callers (GAIL, tests) that pass their own V at higher granularity.
-function drain_pending_episodes!(sampler::Sampler, data)
+# Fill advantage/return/value/importance-weight/cost columns for every episode
+# in `pending_episodes`. V() is evaluated ONCE over the whole buffer per network
+# (so two forwards for the reward critic, two more for Vc when costs are
+# enabled), regardless of how many episodes the buffer contains. This is the
+# only place fill_gae!-style work happens for the parallel-compatible path; the
+# per-episode public `fill_gae!(d, ep, V, …)` API is kept for external callers
+# (GAIL, tests) that pass their own V at higher granularity. In the parallel
+# case `sampler` is a representative sampler — `agent`, `Vc`, `λ`, `γ`, and
+# `traj_weight_fn` are shared across all samplers by construction in
+# `solve(::OnPolicySolver, mdp)`, so any sampler may be passed.
+function drain_pending_episodes!(sampler::Sampler, data, pending_episodes)
     isempty(sampler.pending_episodes) && return
     need_value = haskey(data, :advantage)
     need_cost  = haskey(data, :cost_advantage)
@@ -110,7 +112,7 @@ function drain_pending_episodes!(sampler::Sampler, data)
     Vsp_all = need_value ? vec(cpu(value(sampler.agent.π, data[:sp]))) : nothing
     Vcs_all  = need_cost ? vec(cpu(value(sampler.Vc, data[:s])))  : nothing
     Vcsp_all = need_cost ? vec(cpu(value(sampler.Vc, data[:sp]))) : nothing
-    for ep in sampler.pending_episodes
+    for ep in pending_episodes
         need_value && fill_gae_from_arrays!(data, ep, Vs_all, Vsp_all, sampler.λ, sampler.γ; value_col=:value)
         # ──────────────────────────────────────────────────────────────────────
         # `:return` computation: fix for the Pardo et al. (2018) "Time Limits in
@@ -150,44 +152,21 @@ function drain_pending_episodes!(sampler::Sampler, data)
             fill_returns!(data, ep, sampler.γ; source=:cost, target=:cost_return)
         end
     end
+end
+
+# Single-sampler wrapper.
+function drain_pending_episodes!(sampler::Sampler, data)
+    isempty(sampler.pending_episodes) && return
+    drain_pending_episodes!(sampler, data, sampler.pending_episodes)
     empty!(sampler.pending_episodes)
 end
 
-# Multi-sampler drain: ONE whole-buffer V() call per network for the entire
+# Multi-sampler wrapper. ONE whole-buffer V() call per network for the entire
 # parallel rollout, regardless of how many envs and episodes the buffer holds.
 function drain_pending_episodes!(samplers::AbstractVector{<:Sampler}, data)
-    any_pending = any(!isempty(s.pending_episodes) for s in samplers)
-    any_pending || return
-    # models are shared across samplers by construction
-    π = samplers[1].agent.π
-    Vc = samplers[1].Vc
-    λ = samplers[1].λ
-    γ = samplers[1].γ
-    need_value = haskey(data, :advantage)
-    need_cost  = haskey(data, :cost_advantage)
-    Vs_all  = need_value ? vec(cpu(value(π, data[:s])))  : nothing
-    Vsp_all = need_value ? vec(cpu(value(π, data[:sp]))) : nothing
-    Vcs_all  = need_cost ? vec(cpu(value(Vc, data[:s])))  : nothing
-    Vcsp_all = need_cost ? vec(cpu(value(Vc, data[:sp]))) : nothing
-    for sampler in samplers, ep in sampler.pending_episodes
-        need_value && fill_gae_from_arrays!(data, ep, Vs_all, Vsp_all, λ, γ; value_col=:value)
-        # Pardo fix: returns = advantage + value (see single-sampler drain above for rationale).
-        if haskey(data, :return) && need_value && haskey(data, :value)
-            @views data[:return][1, ep] .= data[:advantage][1, ep] .+ data[:value][1, ep]
-        elseif haskey(data, :return)
-            fill_returns!(data, ep, γ)
-        end
-        haskey(data, :fwd_importance_weight) && fill_fwd_importance_weight!(data, ep)
-        haskey(data, :cum_importance_weight) && fill_cum_importance_weight!(data, ep)
-        haskey(data, :rev_importance_weight) && fill_rev_importance_weight!(data, ep)
-        haskey(data, :traj_importance_weight) && (data[:traj_importance_weight][1,ep] .= sampler.traj_weight_fn(sampler.agent, data, ep))
-        need_cost && fill_gae_from_arrays!(data, ep, Vcs_all, Vcsp_all, λ, γ; source=:cost, target=:cost_advantage, value_col=:cost_value)
-        if haskey(data, :cost_return) && need_cost && haskey(data, :cost_value)
-            @views data[:cost_return][1, ep] .= data[:cost_advantage][1, ep] .+ data[:cost_value][1, ep]
-        elseif haskey(data, :cost_return)
-            fill_returns!(data, ep, γ; source=:cost, target=:cost_return)
-        end
-    end
+    any(!isempty(s.pending_episodes) for s in samplers) || return
+    all_eps = Iterators.flatten(s.pending_episodes for s in samplers)
+    drain_pending_episodes!(samplers[1], data, all_eps)
     foreach(s -> empty!(s.pending_episodes), samplers)
 end
 
