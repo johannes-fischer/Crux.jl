@@ -49,6 +49,7 @@ end
 function batch_train!(π, p::TrainingParams, 𝒫, 𝒟::ExperienceBuffer...; info=Dict(), π_loss=π)
     infos = []
     total_batches = 0
+    early_stopped = false
     for epoch in 1:p.epochs
         minibatch_infos = []
 
@@ -66,13 +67,20 @@ function batch_train!(π, p::TrainingParams, 𝒫, 𝒟::ExperienceBuffer...; in
             push!(minibatch_infos, train!(π, p, loss_fn, info=info))
             total_batches += 1
             total_batches >= p.max_batches && break
-            p.early_stopping([infos...,  aggregate_info(minibatch_infos)]) && break
+            if p.early_stopping([infos...,  aggregate_info(minibatch_infos)])
+                early_stopped = true
+                break
+            end
         end
         push!(infos, aggregate_info(minibatch_infos))
-        p.early_stopping(infos) && break
+        if p.early_stopping(infos)
+            early_stopped = true
+            break
+        end
         total_batches >= p.max_batches && break
 
     end
     info[Symbol(p.name, "batches_trained")] = total_batches
+    info[Symbol(p.name, "early_stopped")] = early_stopped
     merge!(info, aggregate_info(infos))
 end
