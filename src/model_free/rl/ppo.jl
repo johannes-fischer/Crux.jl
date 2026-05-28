@@ -26,7 +26,7 @@ function ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:kl] = mean(𝒟[:logprob] .- new_probs)
         info[:clip_fraction] = sum((r .> 1 + 𝒫[:ϵ]) .| (r .< 1 - 𝒫[:ϵ])) / length(r)
         info[:avg_advantage] = mean(A_raw)
-        info[:avg_return] = mean(𝒟[:return])
+        info[:p_loss] = 𝒫[:λp]*p_loss
     end
     𝒫[:λp]*p_loss + 𝒫[:λe]*e_loss
 end
@@ -47,13 +47,21 @@ If `:value` isn't in the buffer, falls back to plain MSE.
 function ppo_critic_loss(m, 𝒫, 𝒟; info = Dict(), kwargs...)
     v_new = value(m, 𝒟[:s])
     ret = 𝒟[:return]
+    clip_fraction = 0f0
     if haskey(𝒫, :vclip) && !isnothing(𝒫[:vclip]) && haskey(𝒟, :value)
         v_old = 𝒟[:value]
         ϵv = 𝒫[:vclip]
         v_clipped = v_old .+ clamp.(v_new .- v_old, -ϵv, ϵv)
         loss = mean(max.((v_new .- ret) .^ 2, (v_clipped .- ret) .^ 2))
+        clip_fraction = ignore_derivatives(() ->
+            sum(abs.(v_new .- v_old) .> ϵv) / length(v_new))
     else
         loss = Flux.mse(v_new, ret)
+    end
+    ignore_derivatives() do
+        info[:avg_return]           = mean(ret)            # moved from ppo_loss
+        info[:mean_predicted_value] = mean(v_new)
+        info[:clip_fraction_value]  = clip_fraction
     end
     loss
 end
@@ -68,13 +76,21 @@ column or the clip range is absent.
 function ppo_cost_critic_loss(m, 𝒫, 𝒟; info = Dict(), kwargs...)
     v_new = value(m, 𝒟[:s])
     ret = 𝒟[:cost_return]
+    clip_fraction = 0f0
     if haskey(𝒫, :vclip_cost) && !isnothing(𝒫[:vclip_cost]) && haskey(𝒟, :cost_value)
         v_old = 𝒟[:cost_value]
         ϵv = 𝒫[:vclip_cost]
         v_clipped = v_old .+ clamp.(v_new .- v_old, -ϵv, ϵv)
         loss = mean(max.((v_new .- ret) .^ 2, (v_clipped .- ret) .^ 2))
+        clip_fraction = ignore_derivatives(() ->
+            sum(abs.(v_new .- v_old) .> ϵv) / length(v_new))
     else
         loss = Flux.mse(v_new, ret)
+    end
+    ignore_derivatives() do
+        info[:avg_cost_return]           = mean(ret)
+        info[:mean_predicted_cost_value] = mean(v_new)
+        info[:clip_fraction_cost_value]  = clip_fraction
     end
     loss
 end
@@ -199,7 +215,7 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:p_loss] = 𝒫[:λp]*p_loss
         info[:cost_loss] = cost_loss
         info[:avg_advantage] = mean(A_raw)
-        info[:avg_return] = mean(𝒟[:return])
+        info[:avg_cost_advantage] = mean(𝒟[:cost_advantage])
     end
     (𝒫[:λp]*p_loss + 𝒫[:λe]*e_loss + cost_loss) / (1 + penalty)
 end
