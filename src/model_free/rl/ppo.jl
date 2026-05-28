@@ -179,11 +179,11 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         # PID update
         penalty = clamp(𝒫[:Kp] * 𝒫[:smooth_Δ][1] + 𝒫[:I][1] + 𝒫[:Kd]*∂, 0, 𝒫[:penalty_max])
 
-        info["penalty"] = penalty
-        info["cur_cost"] = Jc
-        info["prop_term"] = 𝒫[:Kp] * 𝒫[:smooth_Δ][1]
-        info["deriv_term"] = ∂
-        info["integral term"] = 𝒫[:I][1]
+        info[:penalty] = penalty
+        info[:cur_cost] = Jc
+        info[:prop_term] = 𝒫[:Kp] * 𝒫[:smooth_Δ][1]
+        info[:deriv_term] = ∂
+        info[:integral_term] = 𝒫[:I][1]
 
         penalty
     end
@@ -196,8 +196,8 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:entropy] = -e_loss
         info[:kl] = mean(𝒟[:logprob] .- new_probs)
         info[:clip_fraction] = sum((r .> 1 + 𝒫[:ϵ]) .| (r .< 1 - 𝒫[:ϵ])) / length(r)
-        info["p_loss"] = 𝒫[:λp]*p_loss
-        info["cost_loss"] = cost_loss
+        info[:p_loss] = 𝒫[:λp]*p_loss
+        info[:cost_loss] = cost_loss
         info[:avg_advantage] = mean(A_raw)
         info[:avg_return] = mean(𝒟[:return])
     end

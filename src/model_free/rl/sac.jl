@@ -43,7 +43,7 @@ function sac_actor_loss(m, 𝒫, 𝒟; info=Dict(), π_loss=m)
     π_frozen = ignore_derivatives(π_loss)
     a, logprob = exploration(m, 𝒟[:s])
     ignore_derivatives() do
-        info["entropy"] = -mean(logprob)
+        info[:entropy] = -mean(logprob)
     end
     α = exp(𝒫[:SAC_log_α].v[1])     # constant w.r.t. m
     mean(α .* logprob .- min.(value(π_frozen, 𝒟[:s], a)...))
@@ -60,7 +60,7 @@ function sac_temp_loss(m, 𝒫, 𝒟; info=Dict(), π_loss=m)
     log_α = m.v[1]
     α = exp(log_α)
     ignore_derivatives() do
-        info["SAC alpha"] = α
+        info[:SAC_alpha] = α
     end
     π_frozen = ignore_derivatives(π_loss)
     _, logprob = exploration(π_frozen.A, 𝒟[:s])

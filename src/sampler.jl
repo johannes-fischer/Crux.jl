@@ -224,10 +224,10 @@ function step_with_action!(data, j::Int, sampler::Sampler, a, logprob;
     end
     haskey(data, :t) && (data[:t][1, j] = sampler.episode_length + 1)
     haskey(data, :i) && (data[:i][1, j] = i + 1)
-    haskey(data, :cost) && (data[:cost][1, j] = info["cost"])
-    haskey(data, :grasp_success) && (data[:grasp_success][1, j] = info["grasp_success"])
-    if haskey(data, :z) && haskey(info, "z")
-        z = info["z"]
+    haskey(data, :cost) && (data[:cost][1, j] = info[:cost])
+    haskey(data, :grasp_success) && (data[:grasp_success][1, j] = info[:grasp_success])
+    if haskey(data, :z) && haskey(info, :z)
+        z = info[:z]
         if sampler.agent.π isa LatentConditionedNetwork
             sampler.agent.π.z = z
         end

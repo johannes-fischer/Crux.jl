@@ -50,7 +50,7 @@ function OnPolicyGAIL(;
         D_out = value(D, 𝒟[:a], 𝒟[:s]) # This is swapped because a->x and s->y and the convention for GANs is D(x,y)
         r = αr * logσ.(D_out) .- (1f0 - αr) * logcompσ.(D_out)
         ignore_derivatives() do
-            info["disc_reward"] = mean(r)
+            info[:disc_reward] = mean(r)
         end
 
         𝒟[:r] .= r.*Rscale

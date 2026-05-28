@@ -126,9 +126,9 @@ function TIER(;π,
         push_reservoir!(buffer_obs, D)
         push!(small_buffer, D)
         
-        info["Experience_size"] = length(buffer_er)
-        info["Experience_size_z"] = length(buffer_obs)
-        info["Experience_small_buff_size"] = length(small_buffer)
+        info[:experience_size] = length(buffer_er)
+        info[:experience_size_z] = length(buffer_obs)
+        info[:experience_small_buff_size] = length(small_buffer)
         
         # Train the obs model. Flux 0.16 port: the user-supplied
         # `obs_opt.loss` must take the model as the first arg (Zygote

@@ -34,7 +34,7 @@ function NDA_GAIL_JS(;π,
         r = αr * logσ.(D_out) .- (1f0 - αr) * logcompσ.(D_out)
         ignore_derivatives() do
             minval, maxval = extrema(D_out)
-            info["disc_reward"] = mean(r)
+            info[:disc_reward] = mean(r)
         end
         𝒟[:r] .= r 
         
@@ -44,7 +44,7 @@ function NDA_GAIL_JS(;π,
         c = max.(0, r_nda .- r)
         # c = max.(0, σ.(D_out_nda) .- σ.(D_out))
         ignore_derivatives() do
-            info["disc_nda_cost"] = sum(c) / sum(𝒟[:episode_end])
+            info[:disc_nda_cost] = sum(c) / sum(𝒟[:episode_end])
         end
         𝒟[:cost] .= c
         

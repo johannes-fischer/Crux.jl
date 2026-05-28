@@ -35,8 +35,8 @@ function train!(model, p::TrainingParams, loss_fn::Function; info = Dict())
     gnorm = global_grad_norm(grads[1])
     isnan(gnorm) && error("NaN detected! Loss: $val")
     Flux.update!(p.optimizer_state, model, grads[1])
-    info[string(p.name, "loss")] = val
-    info[string(p.name, "grad_norm")] = gnorm
+    info[Symbol(p.name, "loss")] = val
+    info[Symbol(p.name, "grad_norm")] = gnorm
     info
 end
 
@@ -73,6 +73,6 @@ function batch_train!(π, p::TrainingParams, 𝒫, 𝒟::ExperienceBuffer...; in
         total_batches >= p.max_batches && break
 
     end
-    info[string(p.name, "batches_trained")] = total_batches
+    info[Symbol(p.name, "batches_trained")] = total_batches
     merge!(info, aggregate_info(infos))
 end

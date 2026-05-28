@@ -6,7 +6,7 @@
 # from 𝒫[:CQL_log_α] as a constant).
 function cql_alpha_loss(m, 𝒫, 𝒟; info=Dict(), π_loss=m)
     ignore_derivatives() do
-        info["CQL alpha"] = exp(m.v[1])
+        info[:CQL_alpha] = exp(m.v[1])
     end
     -conservative_loss(ignore_derivatives(π_loss), 𝒫, 𝒟; β_source=m, info=info)
 end
