@@ -183,10 +183,6 @@ function step_with_action!(data, j::Int, sampler::Sampler, a, logprob;
     sampler.was_reset = false
     (a isa AbstractArray || a isa Tuple) && length(a) == 1 && (a = a[1])
 
-    # This implements the ability to get cost information from safety gym
-    info = Dict()
-    kwargs = (haskey(data, :cost) || haskey(data, :z) || haskey(data, :grasp_success)) ? (info=info,) : ()
-
     args = (a,)
     if !isnothing(sampler.adversary)
         x, xlogprob = explore ?
@@ -199,11 +195,14 @@ function step_with_action!(data, j::Int, sampler::Sampler, a, logprob;
         args = (a, x)
     end
 
+    # Side-channel signals (cost / z / grasp_success) ride in the canonical
+    # POMDPs.jl `:info` DDN node — read out of the `info` returned by gen
+    # (Dict or NamedTuple). Falls back to `nothing` when gen doesn't return one.
     if sampler.mdp isa POMDP
-        sp, o, r = @gen(:sp,:o,:r)(sampler.mdp, sampler.s, args..., sampler.rng; kwargs...)
+        sp, o, r, info = @gen(:sp,:o,:r,:info)(sampler.mdp, sampler.s, args..., sampler.rng)
         spvec = convert_o(AbstractArray, o, sampler.mdp)
     else
-        sp, r = @gen(:sp,:r)(sampler.mdp, sampler.s, args..., sampler.rng; kwargs...)
+        sp, r, info = @gen(:sp,:r,:info)(sampler.mdp, sampler.s, args..., sampler.rng)
         spvec = convert_s(AbstractArray, sp, sampler.mdp)
     end
     spvec = tovec(spvec, sampler.S)
@@ -224,9 +223,9 @@ function step_with_action!(data, j::Int, sampler::Sampler, a, logprob;
     end
     haskey(data, :t) && (data[:t][1, j] = sampler.episode_length + 1)
     haskey(data, :i) && (data[:i][1, j] = i + 1)
-    haskey(data, :cost) && (data[:cost][1, j] = info[:cost])
-    haskey(data, :grasp_success) && (data[:grasp_success][1, j] = info[:grasp_success])
-    if haskey(data, :z) && haskey(info, :z)
+    haskey(data, :cost) && (data[:cost][1, j] = info[:cost]) # if :cost is declared, info must provide it
+    haskey(data, :grasp_success) && (data[:grasp_success][1, j] = info[:grasp_success]) # same for :grasp_success
+    if haskey(data, :z) && !isnothing(info) && haskey(info, :z) # :z is optional
         z = info[:z]
         if sampler.agent.π isa LatentConditionedNetwork
             sampler.agent.π.z = z
