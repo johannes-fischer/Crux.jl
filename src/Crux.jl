@@ -61,7 +61,7 @@ module Crux
 
     export Sampler, initial_observation, terminate_episode!, step!, steps!,
            episodes!, metric_by_key, metrics_by_key, undiscounted_return,
-           discounted_return, failure, fill_gae!, fill_returns!, trim!
+           discounted_return, failure, fill_gae!, fill_returns!, fill_traj_failure!, trim!
     include("sampler.jl")
 
     export elapsed, LoggerParams, aggregate_info, log_performance,
@@ -111,6 +111,7 @@ module Crux
     include("model_free/batch.jl")
 
     export REINFORCE, A2C, PPO, LagrangePPO, DQN, DDPG, TD3, SoftQ, SAC
+    export failure_probability, ppo_failure_loss
     include("model_free/rl/reinforce.jl")
     include("model_free/rl/a2c.jl")
     include("model_free/rl/ppo.jl")

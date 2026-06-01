@@ -68,6 +68,19 @@ Parameters specific to cost constraints (a separate value network)
     # Parameters specific to cost constraints (a separate value network)
     Vc::Union{ContinuousNetwork, Nothing} = nothing # Cost value approximator
     cost_opt::Union{Nothing, TrainingParams} = nothing # Training parameters for the cost value
+
+    # F-head (ConstrainedZero chance-constraint failure surrogate). `Vf` is an
+    # INDEPENDENT network whose raw output is a per-state failure LOGIT; it is
+    # trained by `f_opt` with BCE against the :traj_failure column, fully
+    # decoupled from the actor so it never enters the policy gradient (it is a
+    # purely predictive head, exportable to BetaZero/ConstrainedZero — read it
+    # as a probability via `failure_probability(Vf, s)`). `failure_source` /
+    # `traj_failure_mode` configure the trajectory-failure label (see `Sampler`)
+    # and are forwarded to every sampler at `solve` time.
+    Vf::Union{ContinuousNetwork, Nothing} = nothing # Failure-probability approximator (logits)
+    f_opt::Union{Nothing, TrainingParams} = nothing # Training parameters for the failure head
+    failure_source::Symbol = :cost
+    traj_failure_mode::Symbol = :episode
 end
 
 function policy_gradient_training(𝒮::OnPolicySolver, 𝒟)
@@ -91,6 +104,13 @@ function policy_gradient_training(𝒮::OnPolicySolver, 𝒟)
         batch_train!(𝒮.Vc, 𝒮.cost_opt, 𝒮.𝒫, 𝒟, info=info)
     end
 
+    # Train the failure surrogate Vf (if applicable). Independent network +
+    # optimizer; its BCE loss differentiates only Vf, so it never contributes to
+    # the actor/critic/cost-critic gradients.
+    if !isnothing(𝒮.f_opt)
+        batch_train!(𝒮.Vf, 𝒮.f_opt, 𝒮.𝒫, 𝒟, info=info)
+    end
+
     return info
 end
 
@@ -109,7 +129,7 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
     end
 
     if 𝒮.num_envs == 1
-        s = Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns, λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc, rng=mkrng(1000))
+        s = Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns, λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc, failure_source=𝒮.failure_source, traj_failure_mode=𝒮.traj_failure_mode, rng=mkrng(1000))
         run_training_loop!(𝒮, 𝒟, s)
     else
         # Parallel: deep-copy MDP per env, give each sampler an independent
@@ -118,6 +138,7 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
         # across envs — `steps!(samplers, …)` asserts this.
         samplers = [Sampler(deepcopy(mdp), 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns,
                             λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc,
+                            failure_source=𝒮.failure_source, traj_failure_mode=𝒮.traj_failure_mode,
                             rng=mkrng(1000 * e))
                     for e in 1:𝒮.num_envs]
         run_training_loop!(𝒮, 𝒟, samplers)

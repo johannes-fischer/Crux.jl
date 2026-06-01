@@ -96,6 +96,47 @@ function ppo_cost_critic_loss(m, 𝒫, 𝒟; info = Dict(), kwargs...)
 end
 
 """
+F-head failure-probability loss (ConstrainedZero chance-constraint surrogate).
+
+Trains a standalone failure network `Vf` (the differentiated model `m`) whose
+raw output is a per-state failure LOGIT, via binary cross-entropy against the
+`:traj_failure` column (1{trajectory fails}, populated by the sampler in
+`fill_traj_failure!`). This approximates the chance-constraint surrogate
+F(s) ≈ P(eventual failure | s) under the current rollout policy — the
+undiscounted-probability analogue of the discounted cost critic `Vc` (which
+estimates 𝔼[∑ γ^t cost]). Because `Vf` is trained by its own optimizer,
+decoupled from the actor, this loss never contributes to the PPO policy
+gradient: it is a purely predictive head we can later export to
+BetaZero/ConstrainedZero (see [`failure_probability`](@ref)).
+
+Training is done in logit space with `logitbinarycrossentropy` for numerical
+stability; the sigmoid is applied only at readout in `failure_probability`.
+"""
+function ppo_failure_loss(m, 𝒫, 𝒟; info = Dict(), kwargs...)
+    f_logits = value(m, 𝒟[:s])          # raw head output = failure logits
+    targets  = 𝒟[:traj_failure]         # Float32 0/1, broadcast over the episode
+    loss = Flux.logitbinarycrossentropy(f_logits, targets)
+    ignore_derivatives() do
+        info[:avg_traj_failure]     = mean(targets)
+        info[:mean_predicted_pfail] = mean(Flux.sigmoid.(f_logits))
+    end
+    loss
+end
+
+"""
+    failure_probability(Vf, s)
+
+Read the F-head failure surrogate as a probability in [0,1]: applies `sigmoid`
+to the raw logits produced by `value(Vf, s)`, where `Vf` is the network trained
+by [`ppo_failure_loss`](@ref). Use this when exporting the surrogate into
+BetaZero / ConstrainedZero, whose planner consumes a scalar
+`estimate_failure(mdp, s)` — e.g.
+
+    f = (mdp, s) -> only(failure_probability(Vf, input_representation(s)))
+"""
+failure_probability(Vf, s) = Flux.sigmoid.(value(Vf, s))
+
+"""
 Proximal policy optimization (PPO) solver.
 
 cleanrl-aligned defaults:
@@ -251,10 +292,21 @@ LagrangePPO(;
     a_opt::NamedTuple=(;),
     c_opt::NamedTuple=(;),
     cost_opt::NamedTuple=(;),
+    Vf::Union{ContinuousNetwork, Nothing} = nothing, # optional failure-probability surrogate (logit output)
+    f_opt::NamedTuple=(;),
+    failure_source::Symbol = :cost,        # :cost (cost>0) or :fail (isfailure column)
+    traj_failure_mode::Symbol = :episode,  # :episode (BetaZero ref) or :suffix (paper Eq. 8)
     log::NamedTuple=(;),
     required_columns=[],
     kwargs...)
 ```
+
+When `Vf` is supplied, an independent failure-probability head F(s) ≈ P(eventual
+failure | s) is trained by binary cross-entropy against a `:traj_failure` label
+(the ConstrainedZero chance-constraint surrogate). It is fully decoupled from the
+actor/critics — it never enters the policy gradient — and is exported as a
+probability via [`failure_probability`](@ref). With `Vf === nothing`,
+`LagrangePPO` is unchanged.
 
 """
 function LagrangePPO(;
@@ -278,6 +330,10 @@ function LagrangePPO(;
     a_opt::NamedTuple=(;),
     c_opt::NamedTuple=(;),
     cost_opt::NamedTuple=(;),
+    Vf::Union{ContinuousNetwork, Nothing} = nothing, # failure-probability surrogate (raw logit output)
+    f_opt::NamedTuple=(;),
+    failure_source::Symbol = :cost,        # per-step failure event: :cost (cost>0) or :fail (isfailure column)
+    traj_failure_mode::Symbol = :episode,  # label form: :episode (BetaZero ref) or :suffix (paper Eq. 8)
     log::NamedTuple=(;),
     required_columns=[],
     kwargs...)
@@ -310,14 +366,31 @@ function LagrangePPO(;
      isnothing(vclip)      || push!(extra_cols, :value)
      isnothing(vclip_cost) || push!(extra_cols, :cost_value)
 
+     # F-head (ConstrainedZero) wiring: only allocate the :traj_failure column
+     # and build the failure optimizer when a Vf network is supplied — with
+     # Vf === nothing, LagrangePPO behaves exactly as before. When the label is
+     # derived from the :fail predicate, also require that column so the sampler
+     # populates it via extra_functions["isfailure"].
+     failure_cols = Symbol[]
+     if !isnothing(Vf)
+         push!(failure_cols, :traj_failure)
+         failure_source == :fail && push!(failure_cols, :fail)
+     end
+     f_opt_tp = isnothing(Vf) ? nothing :
+                TrainingParams(;loss = ppo_failure_loss, name = "failure_", f_opt...)
+
      OnPolicySolver(;agent=PolicyParams(π),
                     𝒫=𝒫,
                     Vc=Vc,
+                    Vf=Vf,
+                    f_opt=f_opt_tp,
+                    failure_source=failure_source,
+                    traj_failure_mode=traj_failure_mode,
                     log = LoggerParams(;dir = "log/lagrange_ppo", log...),
                     a_opt = TrainingParams(;loss = lagrange_ppo_loss, early_stopping = (infos) -> (infos[end][:kl] > target_kl), name = "actor_", a_opt...),
                     c_opt = TrainingParams(;loss = ppo_critic_loss, name = "critic_", c_opt...),
                     cost_opt = TrainingParams(;loss = ppo_cost_critic_loss, name = "cost_critic_", cost_opt...),
-                    required_columns = unique([required_columns..., :return, :advantage, :logprob, :cost_advantage, :cost, :cost_return, extra_cols...]),
+                    required_columns = unique([required_columns..., :return, :advantage, :logprob, :cost_advantage, :cost, :cost_return, extra_cols..., failure_cols...]),
                     post_sample_callback=record_avgr,
                     kwargs...)
 end

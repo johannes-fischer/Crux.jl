@@ -12,7 +12,7 @@ function mdp_data(S::T1, A::T2, capacity::Int, extras::Array{Symbol} = Symbol[];
         )
     for k in extras
         if k in [:return, :logprob, :xlogprob, :advantage, :cost, :cost_advantage,
-                 :cost_return, :value, :cost_value, :var_prob, :cvar_prob, :f]
+                 :cost_return, :value, :cost_value, :var_prob, :cvar_prob, :f, :traj_failure]
             data[k] = ArrayType(fill(zero(R), 1, capacity))
         elseif k in [:weight, :importance_weight, :fwd_importance_weight,
                      :rev_importance_weight, :cum_importance_weight, :traj_importance_weight,]

@@ -17,6 +17,17 @@
     Vc::Union{ContinuousNetwork, Nothing} = nothing
     λcost::Float32 = NaN32
 
+    # F-head (ConstrainedZero chance-constraint surrogate) trajectory-failure
+    # label config. `failure_source` selects the per-step failure event used to
+    # build the indicator (:cost → cost>0, the LagrangePPO signal; :fail → the
+    # :fail column from extra_functions["isfailure"]). `traj_failure_mode`
+    # selects the broadcast form: :episode → 1 for every step iff the episode
+    # fails anywhere (matches the BetaZero safety-branch reference); :suffix →
+    # eₜ = 1{∃ i≥t: failure} (ConstrainedZero paper, Eq. 8). Only consulted when
+    # the buffer carries a :traj_failure column (see `fill_traj_failure!`).
+    failure_source::Symbol = :cost
+    traj_failure_mode::Symbol = :episode
+
     # Trajectory-level measurements
     traj_weight_fn=nothing # weight of the trajectory
 
@@ -151,6 +162,11 @@ function drain_pending_episodes!(sampler::Sampler, data, pending_episodes)
         elseif haskey(data, :cost_return)
             fill_returns!(data, ep, sampler.γ; source=:cost, target=:cost_return)
         end
+        # F-head (ConstrainedZero) trajectory-failure indicator — a pure
+        # function of observed per-step failures (no network forward),
+        # broadcast over the episode per `sampler.traj_failure_mode`.
+        haskey(data, :traj_failure) && fill_traj_failure!(data, ep;
+            source=sampler.failure_source, mode=sampler.traj_failure_mode)
     end
 end
 
@@ -494,6 +510,42 @@ function fill_returns!(data, episode_range, γ::Float32; source=:r, target=:retu
     for i in reverse(episode_range)
         r = data[source][1, i] + γ*r
         data[target][:, i] .= r
+    end
+end
+
+# Broadcast a trajectory-failure indicator over `episode_range` for the F-head
+# (ConstrainedZero chance-constraint surrogate). Pure function of observed
+# per-step failures — no network forward. `source` selects the per-step failure
+# event: :cost → cost>0 (the LagrangePPO cost signal) or :fail → the :fail
+# column (extra_functions["isfailure"]). `mode` selects the broadcast form:
+#   :episode — 1 for every step iff the episode fails anywhere. Matches the
+#              BetaZero safety-branch reference (`d.u = any(isfailure …)`).
+#   :suffix  — eₜ = 1{∃ i≥t: failure}, the ConstrainedZero paper indicator
+#              (Eq. 8). Differs from :episode only for non-terminal failures;
+#              the two coincide when failure is terminal (the usual case).
+# Fails loudly (repo policy: no silent fallback) if the source column is absent.
+function fill_traj_failure!(data, episode_range; source::Symbol = :cost, mode::Symbol = :episode)
+    isempty(episode_range) && return
+    failed_at = if source == :fail
+        haskey(data, :fail) || error("fill_traj_failure! source=:fail but no :fail column present (declare :fail in required_columns, or use source=:cost)")
+        i -> data[:fail][1, i] > 0 # should be Bool
+    elseif source == :cost
+        haskey(data, :cost) || error("fill_traj_failure! source=:cost but no :cost column present (declare :cost in required_columns, or use source=:fail)")
+        i -> data[:cost][1, i] > 0f0
+    else
+        error("fill_traj_failure!: unknown source=$source (expected :cost or :fail)")
+    end
+    if mode == :episode
+        e = any(failed_at(i) for i in episode_range)
+        data[:traj_failure][1, episode_range] .= e ? 1f0 : 0f0
+    elseif mode == :suffix
+        acc = false
+        for i in reverse(episode_range)
+            acc = acc || failed_at(i)
+            data[:traj_failure][1, i] = acc ? 1f0 : 0f0
+        end
+    else
+        error("fill_traj_failure!: unknown mode=$mode (expected :episode or :suffix)")
     end
 end
 
