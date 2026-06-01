@@ -199,7 +199,14 @@ function step_with_action!(data, j::Int, sampler::Sampler, a, logprob;
     sampler.was_reset = false
     (a isa AbstractArray || a isa Tuple) && length(a) == 1 && (a = a[1])
 
-    args = (a,)
+    # Crux↔POMDPs action seam: coerce the raw policy output to the MDP's action
+    # type via the POMDPs.jl `convert_a` interface (identity when `a` is already
+    # that type, so other problems are unaffected). Only the env-facing copy is
+    # converted — the raw `a` is stored in the buffer below, where the policy
+    # gradient needs it in its native form (e.g. the Gaussian's action vector).
+    a_env = convert_a(actiontype(sampler.mdp), a, sampler.mdp)
+
+    args = (a_env,)
     if !isnothing(sampler.adversary)
         x, xlogprob = explore ?
             exploration(sampler.adversary.π_explore, sampler.svec;
@@ -208,7 +215,7 @@ function step_with_action!(data, j::Int, sampler::Sampler, a, logprob;
         (x isa AbstractArray || x isa Tuple) && length(x) == 1 && (x = x[1]) # disturbances always come out as an array
         data[:x][:, j:j] .= tovec(x, sampler.adversary.space)
         haskey(data, :xlogprob) && (data[:xlogprob][:, j] .= xlogprob)
-        args = (a, x)
+        args = (a_env, x)
     end
 
     # Side-channel signals (cost / z / grasp_success) ride in the canonical
