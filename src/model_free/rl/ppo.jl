@@ -221,44 +221,13 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
     p_loss = -mean(min.(r .* A, clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* A))
     e_loss = -mean(entropy(m, 𝒟[:s]))
 
-    #update the cost penalty
-    penalty = ignore_derivatives() do
-        # 𝒫[:penalty_param][1] = clamp(𝒫[:penalty_param][1], -7, 10)
-        # Flux.softplus(𝒫[:penalty_param][1])
-
-        # Average cost
-        Jc = sum(𝒟[:cost]) / sum(𝒟[:episode_end])
-        # Jc = maximum(𝒟[:cost])
-
-
-        # Compute the error
-        Δ = Jc - 𝒫[:target_cost]
-
-        # Update integral term
-        𝒫[:I][1] = clamp(𝒫[:I][1] + 𝒫[:Ki]*Δ, 0, 𝒫[:Ki_max])
-
-        # Smooth out the values
-        α = 𝒫[:ema_α]
-        𝒫[:smooth_Δ][1] = α * 𝒫[:smooth_Δ][1] + (1 - α)*Δ
-        𝒫[:smooth_Jc][1] = α * 𝒫[:smooth_Jc][1] + (1 - α)*Jc
-
-        # Compute the derivative term
-        ∂ = max(0, 𝒫[:smooth_Jc][1] - 𝒫[:Jc_prev][1])
-
-        # Update the previous cost
-        𝒫[:Jc_prev][1] = 𝒫[:smooth_Jc][1]
-
-        # PID update
-        penalty = clamp(𝒫[:Kp] * 𝒫[:smooth_Δ][1] + 𝒫[:I][1] + 𝒫[:Kd]*∂, 0, 𝒫[:penalty_max])
-
-        info[:penalty] = penalty
-        info[:cur_cost] = Jc
-        info[:prop_term] = 𝒫[:Kp] * 𝒫[:smooth_Δ][1]
-        info[:deriv_term] = ∂
-        info[:integral_term] = 𝒫[:I][1]
-
-        penalty
-    end
+    # Read the cost penalty computed ONCE PER ITERATION by `lagrange_post_sample`
+    # (the solver's post_batch_callback) over the FULL batch — see that function
+    # for the PID controller. Computing it per-minibatch here previously divided
+    # `Σcost / Σepisode_end` over a shuffled minibatch that could contain zero
+    # episode-end markers → 0/0 = NaN, which then poisoned the persistent PID
+    # state (I, smooth_Δ, smooth_Jc, Jc_prev) for every subsequent minibatch.
+    penalty = ignore_derivatives(() -> 𝒫[:penalty][1])
 
     # cost_loss = 𝒫[:penalty_scale] * penalty * mean(r .* 𝒟[:cost_advantage])
     cost_loss = penalty * mean(max.(r .* 𝒟[:cost_advantage], clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* 𝒟[:cost_advantage]))
@@ -271,6 +240,14 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:p_loss] = 𝒫[:λp]*p_loss
         info[:cost_loss] = cost_loss
         info[:avg_advantage] = mean(A_raw)
+        # Surface the per-iteration PID controller state (set by
+        # `lagrange_post_sample`) into training_info so the eval logger keeps
+        # finding `:penalty`/`:cur_cost`/`:prop_term`/`:deriv_term`/`:integral_term`.
+        info[:penalty] = penalty
+        info[:cur_cost] = 𝒫[:cur_cost][1]
+        info[:prop_term] = 𝒫[:prop_term][1]
+        info[:deriv_term] = 𝒫[:deriv_term][1]
+        info[:integral_term] = 𝒫[:I][1]
         log_ratio_stats!(info, logratio, r)
     end
     (𝒫[:λp]*p_loss + 𝒫[:λe]*e_loss + cost_loss) / (1 + penalty)
@@ -353,8 +330,38 @@ function LagrangePPO(;
     required_columns=[],
     kwargs...)
 
-     function record_avgr(𝒟; info=Dict(), 𝒮)
-         info[:avg_r] = sum(𝒟[:r]) / sum(𝒟[:episode_end])
+     # Per-iteration callback — runs ONCE over the FULL batch (post_sample, fired
+     # by `steps!` after the buffer is assembled). Computes `avg_r` AND the
+     # PID-Lagrange penalty update. It MUST be the post_sample_callback, not the
+     # post_batch_callback: the DDE trainer reserves `post_batch_callback` for
+     # periodic eval, and a splatted kwarg there silently overrides anything set
+     # here (keyword splat — last value wins), which would leave the PID state at
+     # its zero init forever (penalty/cost_loss/PID terms all logging 0).
+     #
+     # The cost constraint is on the per-episode cumulative cost return
+     # Jc = 𝔼[Σ_t c_t], estimated as Σcost / (#completed episodes). The denominator
+     # is guarded with max(·,1): `episode_end` is set only at true episode ends
+     # (never on slice cutoffs), so a fully-truncated / non-terminating batch would
+     # otherwise give 0/0 = NaN and poison the persistent PID state. Results are
+     # stashed in 𝒫 for `lagrange_ppo_loss` to read (it no longer mutates state).
+     function lagrange_pid_penalty_update(𝒟; info=Dict(), 𝒮)
+         𝒫 = 𝒮.𝒫
+         n_ep = max(sum(𝒟[:episode_end]), 1)
+         info[:avg_r] = sum(𝒟[:r]) / n_ep
+         Jc = sum(𝒟[:cost]) / n_ep
+         Δ = Jc - 𝒫[:target_cost]
+         𝒫[:I][1] = clamp(𝒫[:I][1] + 𝒫[:Ki]*Δ, 0, 𝒫[:Ki_max])
+         α = 𝒫[:ema_α]
+         𝒫[:smooth_Δ][1] = α * 𝒫[:smooth_Δ][1] + (1 - α)*Δ
+         𝒫[:smooth_Jc][1] = α * 𝒫[:smooth_Jc][1] + (1 - α)*Jc
+         ∂ = max(0, 𝒫[:smooth_Jc][1] - 𝒫[:Jc_prev][1])
+         𝒫[:Jc_prev][1] = 𝒫[:smooth_Jc][1]
+         𝒫[:penalty][1] = clamp(𝒫[:Kp] * 𝒫[:smooth_Δ][1] + 𝒫[:I][1] + 𝒫[:Kd]*∂, 0, 𝒫[:penalty_max])
+         𝒫[:cur_cost][1] = Jc
+         𝒫[:prop_term][1] = 𝒫[:Kp] * 𝒫[:smooth_Δ][1]
+         𝒫[:deriv_term][1] = ∂
+         info[:penalty] = 𝒫[:penalty][1]
+         info[:cur_cost] = Jc
      end
 
      𝒫=(ϵ=ϵ, λp=λp, λe=λe,
@@ -372,6 +379,12 @@ function LagrangePPO(;
         smooth_Jc = [0f0],
         vclip=vclip,
         vclip_cost=vclip_cost,
+        # Per-iteration PID outputs, written by `lagrange_post_sample` and read
+        # by `lagrange_ppo_loss` (which no longer mutates any controller state).
+        penalty = [0f0],
+        cur_cost = [0f0],
+        prop_term = [0f0],
+        deriv_term = [0f0],
         )
 
      # Add :value / :cost_value columns when the respective clip is enabled;
@@ -406,6 +419,6 @@ function LagrangePPO(;
                     c_opt = TrainingParams(;loss = ppo_critic_loss, name = "critic_", c_opt...),
                     cost_opt = TrainingParams(;loss = ppo_cost_critic_loss, name = "cost_critic_", cost_opt...),
                     required_columns = unique([required_columns..., :return, :advantage, :logprob, :cost_advantage, :cost, :cost_return, extra_cols..., failure_cols...]),
-                    post_sample_callback=record_avgr,
+                    post_sample_callback=lagrange_pid_penalty_update,
                     kwargs...)
 end
