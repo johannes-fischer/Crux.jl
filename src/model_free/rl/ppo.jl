@@ -12,7 +12,8 @@ removed.
 """
 function ppo_loss(m, 𝒫, 𝒟; info = Dict())
     new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
-    r = exp.(new_probs .- 𝒟[:logprob])
+    logratio = new_probs .- 𝒟[:logprob]
+    r = exp.(logratio)
 
     A_raw = 𝒟[:advantage]
     # Per-minibatch advantage normalization (cleanrl ppo.py:262)
@@ -27,8 +28,21 @@ function ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:clip_fraction] = sum((r .> 1 + 𝒫[:ϵ]) .| (r .< 1 - 𝒫[:ϵ])) / length(r)
         info[:avg_advantage] = mean(A_raw)
         info[:p_loss] = 𝒫[:λp]*p_loss
+        log_ratio_stats!(info, logratio, r)
     end
     𝒫[:λp]*p_loss + 𝒫[:λe]*e_loss
+end
+
+# Importance-sampling ratio diagnostics. `logratio = new_probs - old_logprob`
+# (raw); `log_ratio_max` is the overflow tell-tale, `r = exp(logratio)`.
+function log_ratio_stats!(info, logratio, r)
+    info[:log_ratio_mean] = mean(logratio)
+    info[:log_ratio_max]  = maximum(logratio)
+    info[:log_ratio_min]  = minimum(logratio)
+    info[:ratio_mean] = mean(r)
+    info[:ratio_max]  = maximum(r)
+    info[:ratio_min]  = minimum(r)
+    return info
 end
 
 """
@@ -198,7 +212,8 @@ Flux 0.16 port: same model-first signature as ppo_loss.
 """
 function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
     new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
-    r = exp.(new_probs .- 𝒟[:logprob])
+    logratio = new_probs .- 𝒟[:logprob]
+    r = exp.(logratio)
 
     A_raw = 𝒟[:advantage]
     # Per-minibatch advantage normalization (matches PPO).
@@ -256,7 +271,7 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:p_loss] = 𝒫[:λp]*p_loss
         info[:cost_loss] = cost_loss
         info[:avg_advantage] = mean(A_raw)
-        info[:avg_cost_advantage] = mean(𝒟[:cost_advantage])
+        log_ratio_stats!(info, logratio, r)
     end
     (𝒫[:λp]*p_loss + 𝒫[:λe]*e_loss + cost_loss) / (1 + penalty)
 end
