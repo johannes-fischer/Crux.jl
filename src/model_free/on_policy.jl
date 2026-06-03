@@ -123,7 +123,7 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
 
     # Dedicated eval sampler so logging carries state across rollouts.
     if isnothing(𝒮.log.sampler)
-        𝒮.log.sampler = Sampler(deepcopy(mdp), 𝒮.agent, S=𝒮.S,
+        𝒮.log.sampler = Sampler(mdp, 𝒮.agent, S=𝒮.S,
                                 max_steps=𝒮.max_steps,
                                 rng=mkrng(999_999))
     end
@@ -132,11 +132,11 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
         s = Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns, λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc, failure_source=𝒮.failure_source, traj_failure_mode=𝒮.traj_failure_mode, rng=mkrng(1000))
         run_training_loop!(𝒮, 𝒟, s)
     else
-        # Parallel: deep-copy MDP per env, give each sampler an independent
+        # Parallel: share the MDP across envs, give each sampler an independent
         # RNG (seeded `Xoshiro(env_seed + 1000*e)` for reproducibility, or
         # `Xoshiro()` when `env_seed === nothing`). ΔN must split evenly
         # across envs — `steps!(samplers, …)` asserts this.
-        samplers = [Sampler(deepcopy(mdp), 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns,
+        samplers = [Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns,
                             λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc,
                             failure_source=𝒮.failure_source, traj_failure_mode=𝒮.traj_failure_mode,
                             rng=mkrng(1000 * e))
