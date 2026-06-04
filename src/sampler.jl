@@ -18,15 +18,22 @@
     λcost::Float32 = NaN32
 
     # F-head (ConstrainedZero chance-constraint surrogate) trajectory-failure
-    # label config. `failure_source` selects the per-step failure event used to
-    # build the indicator (:cost → cost>0, the LagrangePPO signal; :fail → the
-    # :fail column from extra_functions["isfailure"]). `traj_failure_mode`
-    # selects the broadcast form: :episode → 1 for every step iff the episode
-    # fails anywhere (matches the BetaZero safety-branch reference); :suffix →
-    # eₜ = 1{∃ i≥t: failure} (ConstrainedZero paper, Eq. 8). Only consulted when
-    # the buffer carries a :traj_failure column (see `fill_traj_failure!`).
+    # label config. `failure_source` selects how a trajectory is judged to fail:
+    # :cost → cumulative episode cost exceeds the budget (Σₜ costₜ > failure_cost_limit,
+    # the LagrangePPO constraint Jc ≤ target_cost); :fail → any step flags the
+    # :fail column from extra_functions["isfailure"]. `traj_failure_mode`
+    # selects the broadcast form: :episode → 1 for every step iff the trajectory
+    # fails (matches the BetaZero safety-branch reference); :suffix →
+    # eₜ = 1{∃ i≥t: failure event} (ConstrainedZero paper, Eq. 8; only meaningful
+    # for the per-step :fail source). Only consulted when the buffer carries a
+    # :traj_failure column (see `fill_traj_failure!`).
     failure_source::Symbol = :cost
     traj_failure_mode::Symbol = :episode
+    # Cumulative per-episode cost budget for the :cost failure label. A trajectory
+    # fails iff Σₜ costₜ > failure_cost_limit. LagrangePPO forwards its `target_cost`
+    # here so the F-head label matches the constraint. Default 0 reproduces the old
+    # "any step had cost>0" behavior exactly (per-step costs are non-negative).
+    failure_cost_limit::Float32 = 0f0
 
     # Trajectory-level measurements
     traj_weight_fn=nothing # weight of the trajectory
@@ -163,10 +170,11 @@ function drain_pending_episodes!(sampler::Sampler, data, pending_episodes)
             fill_returns!(data, ep, sampler.γ; source=:cost, target=:cost_return)
         end
         # F-head (ConstrainedZero) trajectory-failure indicator — a pure
-        # function of observed per-step failures (no network forward),
+        # function of the observed costs / failure flags (no network forward),
         # broadcast over the episode per `sampler.traj_failure_mode`.
         haskey(data, :traj_failure) && fill_traj_failure!(data, ep;
-            source=sampler.failure_source, mode=sampler.traj_failure_mode)
+            source=sampler.failure_source, mode=sampler.traj_failure_mode,
+            cost_limit=sampler.failure_cost_limit)
     end
 end
 
@@ -521,24 +529,40 @@ function fill_returns!(data, episode_range, γ::Float32; source=:r, target=:retu
 end
 
 # Broadcast a trajectory-failure indicator over `episode_range` for the F-head
-# (ConstrainedZero chance-constraint surrogate). Pure function of observed
-# per-step failures — no network forward. `source` selects the per-step failure
-# event: :cost → cost>0 (the LagrangePPO cost signal) or :fail → the :fail
-# column (extra_functions["isfailure"]). `mode` selects the broadcast form:
-#   :episode — 1 for every step iff the episode fails anywhere. Matches the
-#              BetaZero safety-branch reference (`d.u = any(isfailure …)`).
-#   :suffix  — eₜ = 1{∃ i≥t: failure}, the ConstrainedZero paper indicator
-#              (Eq. 8). Differs from :episode only for non-terminal failures;
-#              the two coincide when failure is terminal (the usual case).
+# (ConstrainedZero chance-constraint surrogate). Pure function of the observed
+# costs / failure flags — no network forward. `source` selects how the
+# trajectory is judged to fail:
+#   :cost — cumulative episode cost exceeds the budget: Σₜ costₜ > cost_limit.
+#           This aligns with the LagrangePPO constraint Jc ≤ target_cost (pass
+#           `cost_limit = target_cost`). Failure is a whole-trajectory property
+#           realized at episode end, so the label is the same for every step and
+#           `mode` makes no difference. With `cost_limit = 0` this reduces to the
+#           old "any step had cost>0" test (per-step costs are non-negative).
+#           NOTE: the per-step `costₜ > 0` form was wrong for a continuous cost
+#           signal — almost every step has cost>0, so every episode was labeled
+#           a failure and F(s) collapsed to ≈1.
+#   :fail — the :fail column (extra_functions["isfailure"]) is a genuine per-step
+#           failure event; here `mode` selects the broadcast form:
+#             :episode — 1 for every step iff the episode fails anywhere. Matches
+#                        the BetaZero safety-branch reference (`d.u = any(…)`).
+#             :suffix  — eₜ = 1{∃ i≥t: failure}, the ConstrainedZero paper
+#                        indicator (Eq. 8). Differs from :episode only for
+#                        non-terminal failures; the two coincide when failure is
+#                        terminal (the usual case).
 # Fails loudly (repo policy: no silent fallback) if the source column is absent.
-function fill_traj_failure!(data, episode_range; source::Symbol = :cost, mode::Symbol = :episode)
+function fill_traj_failure!(data, episode_range; source::Symbol = :cost, mode::Symbol = :episode, cost_limit::Real = 0f0)
     isempty(episode_range) && return
-    failed_at = if source == :fail
-        haskey(data, :fail) || error("fill_traj_failure! source=:fail but no :fail column present (declare :fail in required_columns, or use source=:cost)")
-        i -> data[:fail][1, i] > 0 # should be Bool
-    elseif source == :cost
+    if source == :cost
+        # Cumulative-budget failure: a whole-trajectory property (Σₜ costₜ vs the
+        # budget), realized at episode end, so it broadcasts identically over the
+        # episode regardless of `mode` — :episode and :suffix coincide here.
         haskey(data, :cost) || error("fill_traj_failure! source=:cost but no :cost column present (declare :cost in required_columns, or use source=:fail)")
-        i -> data[:cost][1, i] > 0f0
+        cum_cost = sum(@view data[:cost][1, episode_range])
+        data[:traj_failure][1, episode_range] .= cum_cost > cost_limit ? 1f0 : 0f0
+        return
+    elseif source == :fail
+        haskey(data, :fail) || error("fill_traj_failure! source=:fail but no :fail column present (declare :fail in required_columns, or use source=:cost)")
+        failed_at = i -> data[:fail][1, i] > 0 # should be Bool
     else
         error("fill_traj_failure!: unknown source=$source (expected :cost or :fail)")
     end

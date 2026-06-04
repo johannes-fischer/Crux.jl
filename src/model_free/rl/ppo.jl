@@ -295,8 +295,9 @@ LagrangePPO(;
     cost_opt::NamedTuple=(;),
     Vf::Union{ContinuousNetwork, Nothing} = nothing, # optional failure-probability surrogate (logit output)
     f_opt::NamedTuple=(;),
-    failure_source::Symbol = :cost,        # :cost (cost>0) or :fail (isfailure column)
-    traj_failure_mode::Symbol = :episode,  # :episode (BetaZero ref) or :suffix (paper Eq. 8)
+    failure_source::Symbol = :cost,        # :cost (cumulative cost > limit) or :fail (isfailure column)
+    traj_failure_mode::Symbol = :episode,  # :episode (BetaZero ref) or :suffix (paper Eq. 8; :fail only)
+    failure_cost_limit::Real = target_cost, # budget for the :cost label; defaults to the constraint level
     log::NamedTuple=(;),
     required_columns=[],
     kwargs...)
@@ -333,8 +334,9 @@ function LagrangePPO(;
     cost_opt::NamedTuple=(;),
     Vf::Union{ContinuousNetwork, Nothing} = nothing, # failure-probability surrogate (raw logit output)
     f_opt::NamedTuple=(;),
-    failure_source::Symbol = :cost,        # per-step failure event: :cost (cost>0) or :fail (isfailure column)
-    traj_failure_mode::Symbol = :episode,  # label form: :episode (BetaZero ref) or :suffix (paper Eq. 8)
+    failure_source::Symbol = :cost,        # trajectory-failure source: :cost (Σ costₜ > limit) or :fail (isfailure column)
+    traj_failure_mode::Symbol = :episode,  # label form: :episode (BetaZero ref) or :suffix (paper Eq. 8; :fail only)
+    failure_cost_limit::Real = target_cost, # cumulative cost budget for the :cost label; defaults to the constraint level
     log::NamedTuple=(;),
     required_columns=[],
     kwargs...)
@@ -423,6 +425,7 @@ function LagrangePPO(;
                     f_opt=f_opt_tp,
                     failure_source=failure_source,
                     traj_failure_mode=traj_failure_mode,
+                    failure_cost_limit=Float32(failure_cost_limit),
                     log = LoggerParams(;dir = "log/lagrange_ppo", log...),
                     a_opt = TrainingParams(;loss = lagrange_ppo_loss, early_stopping = (infos) -> (infos[end][:kl] > target_kl), name = "actor_", a_opt...),
                     c_opt = TrainingParams(;loss = ppo_critic_loss, name = "critic_", c_opt...),

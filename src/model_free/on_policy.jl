@@ -81,6 +81,7 @@ Parameters specific to cost constraints (a separate value network)
     f_opt::Union{Nothing, TrainingParams} = nothing # Training parameters for the failure head
     failure_source::Symbol = :cost
     traj_failure_mode::Symbol = :episode
+    failure_cost_limit::Float32 = 0f0 # Cumulative cost budget for the :cost label (LagrangePPO forwards target_cost)
 end
 
 function policy_gradient_training(𝒮::OnPolicySolver, 𝒟)
@@ -129,7 +130,7 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
     end
 
     if 𝒮.num_envs == 1
-        s = Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns, λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc, failure_source=𝒮.failure_source, traj_failure_mode=𝒮.traj_failure_mode, rng=mkrng(1000))
+        s = Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns, λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc, failure_source=𝒮.failure_source, traj_failure_mode=𝒮.traj_failure_mode, failure_cost_limit=𝒮.failure_cost_limit, rng=mkrng(1000))
         run_training_loop!(𝒮, 𝒟, s)
     else
         # Parallel: share the MDP across envs, give each sampler an independent
@@ -139,6 +140,7 @@ function POMDPs.solve(𝒮::OnPolicySolver, mdp)
         samplers = [Sampler(mdp, 𝒮.agent, S=𝒮.S, required_columns=𝒮.required_columns,
                             λ=λ, max_steps=𝒮.max_steps, Vc=𝒮.Vc,
                             failure_source=𝒮.failure_source, traj_failure_mode=𝒮.traj_failure_mode,
+                            failure_cost_limit=𝒮.failure_cost_limit,
                             rng=mkrng(1000 * e))
                     for e in 1:𝒮.num_envs]
         run_training_loop!(𝒮, 𝒟, samplers)
