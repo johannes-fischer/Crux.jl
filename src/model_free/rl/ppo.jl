@@ -29,6 +29,11 @@ function ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:avg_advantage] = mean(A_raw)
         info[:p_loss] = 𝒫[:λp]*p_loss
         log_ratio_stats!(info, logratio, r)
+        check_finite_inputs("ppo_loss",
+            "s" => 𝒟[:s], "a" => 𝒟[:a], "logprob" => 𝒟[:logprob],
+            "advantage" => A_raw,
+            "new_probs" => new_probs, "logratio" => logratio, "r" => r,
+            "p_loss" => p_loss, "e_loss" => e_loss)
     end
     𝒫[:λp]*p_loss + 𝒫[:λe]*e_loss
 end
@@ -224,6 +229,10 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
     # Mirrors the GAIL solvers, which whiten both advantages.
     Ac_raw = 𝒟[:cost_advantage]
     Ac = ignore_derivatives(() -> whiten(Ac_raw))
+    # Bind the *unclipped* products to names (no extra work — they were already
+    # computed inside min/max) so the NaN probe can see them directly. These are
+    # the only overflow-prone terms: the clipped branch is bounded because
+    # clamp(r) ∈ [1-ϵ, 1+ϵ], so it can't blow up unless A/Ac is already non-finite.
     rA = r .* A
     p_term = min.(rA, clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* A)
     p_loss = -mean(p_term)
@@ -258,6 +267,13 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:deriv_term] = 𝒫[:deriv_term][1]
         info[:integral_term] = 𝒫[:I][1]
         log_ratio_stats!(info, logratio, r)
+        check_finite_inputs("lagrange_ppo_loss",
+            "s" => 𝒟[:s], "a" => 𝒟[:a], "logprob" => 𝒟[:logprob],
+            "advantage" => A_raw, "cost" => 𝒟[:cost],
+            "cost_advantage" => Ac_raw,
+            "new_probs" => new_probs, "logratio" => logratio, "r" => r,
+            "penalty" => penalty, "p_loss" => p_loss, "e_loss" => e_loss,
+            "cost_loss" => cost_loss)
     end
     (𝒫[:λp]*p_loss + 𝒫[:λe]*e_loss + cost_loss) / (1 + penalty)
 end

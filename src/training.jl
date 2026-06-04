@@ -26,6 +26,50 @@ end
 # now take the model `m` as their first positional argument; Zygote
 # differentiates with respect to that argument.
 
+# Per-leaf non-finite localization for a Zygote gradient tree (or any nested
+# NamedTuple / Tuple / Array structure). Prints one line per leaf that is
+# NaN/Inf, with its path + shape + counts, so a non-finite grad-norm can be
+# traced to the specific parameter whose gradient went bad. Distilled from
+# DroneDatasetAnalysis' nan_utils.jl — we only need localization here, not its
+# file-dump / model-walk machinery.
+function summarize_nonfinite_grads(io::IO, obj::Union{NamedTuple, Tuple}, path::String = "")
+    for (key, val) in (obj isa Tuple ? enumerate(obj) : pairs(obj))
+        sep = isempty(path) ? "" : "."
+        summarize_nonfinite_grads(io, val, "$path$sep$key")
+    end
+end
+function summarize_nonfinite_grads(io::IO, x::AbstractArray, path::String)
+    n_nan = count(isnan, x)
+    n_inf = count(v -> !isnan(v) && !isfinite(v), x)
+    (n_nan > 0 || n_inf > 0) &&
+        println(io, "  [BAD] $path  shape=$(size(x))  nan=$n_nan inf=$n_inf / $(length(x))")
+end
+summarize_nonfinite_grads(io::IO, x::Real, path::String) =
+    (isnan(x) || !isfinite(x)) && println(io, "  [BAD] $path  value=$x")
+summarize_nonfinite_grads(::IO, ::Any, ::String) = nothing
+
+# Forward non-finite localizer: given `name => value` pairs, throw naming every
+# one that contains NaN/Inf — so a loss NaN is attributed to its SOURCE (e.g. an
+# Inf advantage from a diverged critic, or a blown-up importance ratio) BEFORE it
+# propagates into the gradient. Cheap `any(!isfinite, ·)` per tensor; detailed
+# counts only for offenders. List raw inputs first and derived quantities last so
+# the first-named entry is the root cause. Complements `summarize_nonfinite_grads`
+# (the backward-pass case: all inputs finite, but a gradient is not).
+function check_finite_inputs(where::AbstractString, pairs::Pair...)
+    bad = String[]
+    for (name, x) in pairs
+        x === nothing && continue
+        if x isa Real
+            isfinite(x) || push!(bad, "$name=$x")
+        elseif x isa AbstractArray && any(!isfinite, x)
+            n_nan = count(isnan, x)
+            n_inf = count(v -> !isnan(v) && !isfinite(v), x)
+            push!(bad, "$name(nan=$n_nan inf=$n_inf/$(length(x)))")
+        end
+    end
+    isempty(bad) || error("Non-finite in $where → " * join(bad, ", "))
+end
+
 function train!(model, p::TrainingParams, loss_fn::Function; info = Dict())
     if p.optimizer_state === nothing
         p.optimizer_state = Flux.setup(p.optimizer, model)
@@ -33,7 +77,19 @@ function train!(model, p::TrainingParams, loss_fn::Function; info = Dict())
     val, grads = Flux.withgradient(m -> loss_fn(m; info = info) + p.regularizer(m), model)
     typeof(val) == Float64 && @error "Float64 loss found: computation in double precision may be slow"
     gnorm = global_grad_norm(grads[1])
-    isnan(gnorm) && error("NaN detected! Loss: $val")
+    # Localize on ANY non-finite grad-norm (NaN *or* Inf). Catching Inf too is
+    # the point: an Inf grad-norm previously slipped this check, got clipped to
+    # NaN by ClipNorm, and corrupted the params — so the *next* step reported a
+    # useless "everything is NaN". Reporting here names the culprit early.
+    if !isfinite(gnorm)
+        @error "Non-finite gradient norm in train!(\"$(p.name)\")" gnorm loss=val loss_is_finite=isfinite(val)
+        # loss finite + grad non-finite ⇒ the NaN/Inf is born in the BACKWARD
+        # pass (e.g. 0·Inf, or d/dx of √/log/clamp at a bad point). loss already
+        # non-finite ⇒ it came from the FORWARD loss computation.
+        println(stderr, "── non-finite gradient leaves (path  shape  counts) ──")
+        summarize_nonfinite_grads(stderr, grads[1])
+        error("Non-finite gradient norm ($gnorm), loss=$val. See per-leaf summary above.")
+    end
     Flux.update!(p.optimizer_state, model, grads[1])
     info[Symbol(p.name, "loss")] = val
     info[Symbol(p.name, "grad_norm")] = gnorm
