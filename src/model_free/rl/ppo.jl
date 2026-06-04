@@ -218,7 +218,15 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
     A_raw = 𝒟[:advantage]
     # Per-minibatch advantage normalization (matches PPO).
     A = ignore_derivatives(() -> whiten(A_raw))
-    p_loss = -mean(min.(r .* A, clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* A))
+    # Same per-minibatch whitening for the cost advantage — keeps it O(1) and on
+    # the same scale as the reward advantage (the reward p_loss never NaN'd with
+    # the same r, the only difference being that A was whitened and this wasn't).
+    # Mirrors the GAIL solvers, which whiten both advantages.
+    Ac_raw = 𝒟[:cost_advantage]
+    Ac = ignore_derivatives(() -> whiten(Ac_raw))
+    rA = r .* A
+    p_term = min.(rA, clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* A)
+    p_loss = -mean(p_term)
     e_loss = -mean(entropy(m, 𝒟[:s]))
 
     # Read the cost penalty computed ONCE PER ITERATION by `lagrange_post_sample`
@@ -230,7 +238,7 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
     penalty = ignore_derivatives(() -> 𝒫[:penalty][1])
 
     # cost_loss = 𝒫[:penalty_scale] * penalty * mean(r .* 𝒟[:cost_advantage])
-    cost_loss = penalty * mean(max.(r .* 𝒟[:cost_advantage], clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* 𝒟[:cost_advantage]))
+    cost_loss = penalty * mean(max.(r .* Ac, clamp.(r, (1f0 - 𝒫[:ϵ]), (1f0 + 𝒫[:ϵ])) .* Ac))
 
     # Log useful information
     ignore_derivatives() do
@@ -240,6 +248,7 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:p_loss] = 𝒫[:λp]*p_loss
         info[:cost_loss] = cost_loss
         info[:avg_advantage] = mean(A_raw)
+        info[:avg_cost_advantage] = mean(Ac_raw)
         # Surface the per-iteration PID controller state (set by
         # `lagrange_post_sample`) into training_info so the eval logger keeps
         # finding `:penalty`/`:cur_cost`/`:prop_term`/`:deriv_term`/`:integral_term`.
