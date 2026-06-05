@@ -366,6 +366,13 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:prop_term] = 𝒫[:prop_term][1]
         info[:deriv_term] = 𝒫[:deriv_term][1]
         info[:integral_term] = 𝒫[:I][1]
+        # Cost-constraint violation, surfaced for logging. `target_cost` is the
+        # constraint level; `cost_delta` is the raw violation Δ = Jc − target_cost
+        # that drives the PID; `smooth_cost_delta` is the EMA-smoothed Δ that the
+        # proportional term actually uses (prop_term = Kp · smooth_Δ).
+        info[:target_cost] = 𝒫[:target_cost]
+        info[:cost_delta] = 𝒫[:cur_cost][1] - 𝒫[:target_cost]
+        info[:smooth_cost_delta] = 𝒫[:smooth_Δ][1]
         log_ratio_stats!(info, logratio, r)
         check_finite_inputs("lagrange_ppo_loss",
             "s" => 𝒟[:s], "a" => 𝒟[:a], "logprob" => 𝒟[:logprob],
