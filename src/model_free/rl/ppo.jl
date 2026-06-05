@@ -11,7 +11,15 @@ rollout-wide whitening that previously lived in `post_batch_callback` is
 removed.
 """
 function ppo_loss(m, 𝒫, 𝒟; info = Dict())
-    new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
+    # Evaluate the Gaussian mean head once and reuse it for both the log-prob
+    # and the σ-gradient diagnostic (info block below); logpdf(::GaussianPolicy)
+    # would recompute m.μ(s), the expensive backbone forward. Identical to
+    # `logpdf(m, 𝒟[:s], 𝒟[:a])`. Non-Gaussian policies use the generic logpdf
+    # and skip the σ diagnostic.
+    isgauss = m isa GaussianPolicy
+    μ_actor = isgauss ? m.μ(𝒟[:s]) : nothing
+    new_probs = isgauss ? gaussian_logpdf(μ_actor, m.logΣ(𝒟[:s]), 𝒟[:a]) :
+                          logpdf(m, 𝒟[:s], 𝒟[:a])
     logratio = new_probs .- 𝒟[:logprob]
     r = exp.(logratio)
 
@@ -27,6 +35,16 @@ function ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:kl] = mean(𝒟[:logprob] .- new_probs)
         info[:clip_fraction] = sum((r .> 1 + 𝒫[:ϵ]) .| (r .< 1 - 𝒫[:ϵ])) / length(r)
         info[:avg_advantage] = mean(A_raw)
+        info[:std_advantage] = std(A_raw)
+        # Per-axis logΣ gradient as scalars (info dict feeds Crux's TBLogger,
+        # which only logs Reals — a vector value would throw). Keys are
+        # `logsigma_grad_reward_<d>`, d = action dim; the env maps 1→lon, 2→lat.
+        if !isnothing(μ_actor)
+            g = logsigma_objective_grad(μ_actor, exp.(m.logΣ(𝒟[:s])), 𝒟[:a], A)
+            for d in eachindex(g)
+                info[Symbol(:logsigma_grad_reward_, d)] = g[d]
+            end
+        end
         info[:p_loss] = 𝒫[:λp]*p_loss
         log_ratio_stats!(info, logratio, r)
         check_finite_inputs("ppo_loss",
@@ -48,6 +66,68 @@ function log_ratio_stats!(info, logratio, r)
     info[:ratio_max]  = maximum(r)
     info[:ratio_min]  = minimum(r)
     return info
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Exploration-σ diagnostics (logged, never differentiated)
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    logsigma_objective_grad(μ, σ, a, A_w) -> Vector  (length = action_dim)
+
+Per-axis gradient of the PPO policy objective w.r.t. the policy's log-std
+vector `logΣ`, evaluated on the current minibatch. This is exactly the signal
+that does (or doesn't) shrink the exploration σ during training, so we log it.
+`μ`/`σ` are the policy mean/std already evaluated on the minibatch states
+(reused from the log-prob computation, so this adds no extra backbone forward).
+
+Derivation. For a diagonal-covariance Gaussian policy, the log-density of one
+sampled action on axis `d` is
+
+    log π_d = −½ z_d² − logΣ_d − ½ log(2π),     z_d = (a_d − μ_d) / σ_d,
+
+so its score w.r.t. the log-std is the per-sample quantity
+
+    ∂ log π / ∂ logΣ_d = z_d² − 1.
+
+The PPO objective is J = E[ r · A ] with r = π_new/π_old; its gradient is the
+advantage-weighted average of that score — the REINFORCE form ∇J = E[A·∇logπ] —
+which at r ≈ 1 over the minibatch is
+
+    ∂J / ∂logΣ_d = mean( A_w · (z_d² − 1) ) = cov(A_w, z_d²)
+
+(the −1 term drops because the advantages `A_w` are whitened, so mean(A_w)=0).
+Each returned entry therefore IS the logΣ_d gradient contributed by this
+advantage stream: > 0 widens σ_d (deviating from the mean paid off), < 0
+tightens it (staying near the mean paid off), ≈ 0 means the advantage carries
+no information about action magnitude and σ_d is left where it is. Pass the
+reward advantage for the reward critic's contribution, the cost advantage for
+the cost critic's; the actor's net move is Δ logΣ_d ∝ λp·(reward) − penalty·(cost).
+
+`A_w` must be the already-whitened advantage the loss uses. Returns a host
+Vector so callers can index it for logging without GPU scalar indexing.
+"""
+function logsigma_objective_grad(μ, σ, a, A_w)
+    z2 = ((a .- μ) ./ σ) .^ 2                          # (action_dim, N), standardized²
+    cpu(vec(mean((z2 .- 1) .* reshape(A_w, 1, :), dims = 2)))
+end
+
+"""
+    explained_variance(returns, values) -> Float
+
+Canonical value-head explained variance over the full rollout,
+
+    EV = 1 − Var(returns − values) / Var(returns),
+
+using the rollout-time predictions (the cached `:value` / `:cost_value`
+column). 1 = perfect, 0 = no better than predicting the mean return, < 0 =
+worse. Low EV means the advantages are mostly critic noise — the usual upstream
+reason `logsigma_objective_grad` sits at ≈ 0 and σ never moves.
+"""
+function explained_variance(returns, values)
+    ret = vec(cpu(returns))
+    vret = var(ret)
+    vret > 0 ? 1 - var(ret .- vec(cpu(values))) / vret : oftype(vret, NaN)
 end
 
 """
@@ -194,6 +274,8 @@ function PPO(;
 
      function record_avgr(𝒟; info=Dict(), 𝒮)
          info[:avg_r] = sum(𝒟[:r]) / sum(𝒟[:episode_end])
+         haskey(𝒟, :value) && (info[:explained_variance] =
+             explained_variance(𝒟[:return], 𝒟[:value]))
      end
 
      # Add :value column when value clipping is on; the sampler's fill_gae!
@@ -216,7 +298,12 @@ PPO loss with a penalty (Lagrange-constrained PPO).
 Flux 0.16 port: same model-first signature as ppo_loss.
 """
 function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
-    new_probs = logpdf(m, 𝒟[:s], 𝒟[:a])
+    # See ppo_loss: compute the Gaussian mean once, reuse for log-prob + the
+    # σ-gradient diagnostic. Identical to `logpdf(m, 𝒟[:s], 𝒟[:a])`.
+    isgauss = m isa GaussianPolicy
+    μ_actor = isgauss ? m.μ(𝒟[:s]) : nothing
+    new_probs = isgauss ? gaussian_logpdf(μ_actor, m.logΣ(𝒟[:s]), 𝒟[:a]) :
+                          logpdf(m, 𝒟[:s], 𝒟[:a])
     logratio = new_probs .- 𝒟[:logprob]
     r = exp.(logratio)
 
@@ -258,6 +345,19 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:cost_loss] = cost_loss
         info[:avg_advantage] = mean(A_raw)
         info[:avg_cost_advantage] = mean(Ac_raw)
+        info[:std_advantage] = std(A_raw)
+        info[:std_cost_advantage] = std(Ac_raw)
+        # Per-axis logΣ gradient as scalars (see ppo_loss): keys
+        # `logsigma_grad_{reward,cost}_<d>`, d = action dim (env maps 1→lon, 2→lat).
+        if !isnothing(μ_actor)
+            σ_actor = exp.(m.logΣ(𝒟[:s]))
+            gr = logsigma_objective_grad(μ_actor, σ_actor, 𝒟[:a], A)
+            gc = logsigma_objective_grad(μ_actor, σ_actor, 𝒟[:a], Ac)
+            for d in eachindex(gr)
+                info[Symbol(:logsigma_grad_reward_, d)] = gr[d]
+                info[Symbol(:logsigma_grad_cost_, d)]   = gc[d]
+            end
+        end
         # Surface the per-iteration PID controller state (set by
         # `lagrange_post_sample`) into training_info so the eval logger keeps
         # finding `:penalty`/`:cur_cost`/`:prop_term`/`:deriv_term`/`:integral_term`.
@@ -389,6 +489,10 @@ function LagrangePPO(;
          𝒫[:deriv_term][1] = ∂
          info[:penalty] = 𝒫[:penalty][1]
          info[:cur_cost] = Jc
+         haskey(𝒟, :value) && (info[:explained_variance] =
+             explained_variance(𝒟[:return], 𝒟[:value]))
+         haskey(𝒟, :cost_value) && (info[:explained_variance_cost] =
+             explained_variance(𝒟[:cost_return], 𝒟[:cost_value]))
      end
 
      𝒫=(ϵ=ϵ, λp=λp, λe=λe,
