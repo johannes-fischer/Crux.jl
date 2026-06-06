@@ -418,6 +418,7 @@ LagrangePPO(;
     target_cost = 0.025f0,
     penalty_scale = 1f0,
     penalty_max = Inf32,
+    penalty_init = 1f0,    # initial Lagrange multiplier (seeds the PID integral)
     Ki_max = 10f0,
     Ki = 1f-3,
     Kp = 1,
@@ -457,6 +458,7 @@ function LagrangePPO(;
     target_cost = 0.025f0,
     penalty_scale = 1f0,
     penalty_max = Inf32,
+    penalty_init = 1f0,    # initial Lagrange multiplier — seeds the PID integral
     Ki_max = 10f0,
     Ki = 1f-3,
     Kp = 1,
@@ -519,7 +521,10 @@ function LagrangePPO(;
         penalty_scale=penalty_scale,
         penalty_max=penalty_max,
         Ki_max=Ki_max,
-        I = [0f0],
+        # Seed the integral accumulator with `penalty_init` so the multiplier
+        # starts at ~penalty_init and the PID relaxes it from there once the
+        # constraint is met (Δ<0 ⇒ I decays). Default 1f0 (was an implicit 0).
+        I = [Float32(penalty_init)],
         Jc_prev = [0f0],
         Ki=Ki,
         Kp=Kp,
@@ -531,7 +536,9 @@ function LagrangePPO(;
         vclip_cost=vclip_cost,
         # Per-iteration PID outputs, written by `lagrange_post_sample` and read
         # by `lagrange_ppo_loss` (which no longer mutates any controller state).
-        penalty = [0f0],
+        # `penalty` seeded with `penalty_init` for the (cosmetic) first read
+        # before the post-sample callback recomputes it from the PID terms.
+        penalty = [Float32(penalty_init)],
         cur_cost = [0f0],
         prop_term = [0f0],
         deriv_term = [0f0],
