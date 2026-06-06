@@ -39,12 +39,17 @@ function ppo_loss(m, 𝒫, 𝒟; info = Dict())
         # Per-axis logΣ gradient as scalars (info dict feeds Crux's TBLogger,
         # which only logs Reals — a vector value would throw). Keys are
         # `logsigma_grad_reward_<d>`, d = action dim; the env maps 1→lon, 2→lat.
+        # `net_<d>` = the actual per-axis driving force on logΣ: Δ logΣ_d ∝
+        # λp·cov_reward_d (vanilla PPO has no cost term). Logged so the σ-move is
+        # readable without cross-referencing λp.
         if !isnothing(μ_actor)
             g = logsigma_objective_grad(μ_actor, exp.(m.logΣ(𝒟[:s])), 𝒟[:a], A)
             for d in eachindex(g)
                 info[Symbol(:logsigma_grad_reward_, d)] = g[d]
+                info[Symbol(:logsigma_grad_net_, d)]    = 𝒫[:λp] * g[d]
             end
         end
+        info[:lambda_p] = 𝒫[:λp]
         info[:p_loss] = 𝒫[:λp]*p_loss
         log_ratio_stats!(info, logratio, r)
         check_finite_inputs("ppo_loss",
@@ -349,6 +354,11 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
         info[:std_cost_advantage] = std(Ac_raw)
         # Per-axis logΣ gradient as scalars (see ppo_loss): keys
         # `logsigma_grad_{reward,cost}_<d>`, d = action dim (env maps 1→lon, 2→lat).
+        # `net_<d>` = the actual per-axis driving force on logΣ the solver
+        # applies: Δ logΣ_d ∝ λp·cov_reward_d − penalty·cov_cost_d (the entropy
+        # bonus λe and the positive 1/(1+penalty) rescale are omitted — they
+        # don't flip the sign). > 0 widens σ_d, < 0 tightens it. Logged so the
+        # reward/cost tug is comparable without pulling λp + penalty separately.
         if !isnothing(μ_actor)
             σ_actor = exp.(m.logΣ(𝒟[:s]))
             gr = logsigma_objective_grad(μ_actor, σ_actor, 𝒟[:a], A)
@@ -356,8 +366,10 @@ function lagrange_ppo_loss(m, 𝒫, 𝒟; info = Dict())
             for d in eachindex(gr)
                 info[Symbol(:logsigma_grad_reward_, d)] = gr[d]
                 info[Symbol(:logsigma_grad_cost_, d)]   = gc[d]
+                info[Symbol(:logsigma_grad_net_, d)]    = 𝒫[:λp] * gr[d] - penalty * gc[d]
             end
         end
+        info[:lambda_p] = 𝒫[:λp]
         # Surface the per-iteration PID controller state (set by
         # `lagrange_post_sample`) into training_info so the eval logger keeps
         # finding `:penalty`/`:cur_cost`/`:prop_term`/`:deriv_term`/`:integral_term`.
