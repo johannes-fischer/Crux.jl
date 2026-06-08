@@ -267,7 +267,15 @@ function step_with_action!(data, j::Int, sampler::Sampler, a, logprob;
         end
         data[:z][:, j] = z
     end
-    haskey(data, :fail) && (data[:fail][1, j] = extra_functions["isfailure"](sampler.mdp, sp)) #TODO Changed this to "s" instead of "sp" for the continuum world
+    # F-head failure label source. Prefer the env's `info[:fail]` side-channel
+    # (same convention as `:cost`/`:grasp_success` above — failure rides in the
+    # canonical POMDPs.jl `:info` DDN node); fall back to a registered
+    # `isfailure(mdp, sp)` predicate for envs that signal failure as a pure
+    # function of state. With `:fail` declared, exactly one must provide it.
+    if haskey(data, :fail)
+        data[:fail][1, j] = (!isnothing(info) && haskey(info, :fail)) ?
+            info[:fail] : extra_functions["isfailure"](sampler.mdp, sp) #TODO Changed this to "s" instead of "sp" for the continuum world
+    end
 
     # Cut the episode short if needed
     sampler.episode_length += 1

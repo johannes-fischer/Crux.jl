@@ -259,10 +259,25 @@ PPO(;
     vclip::Union{Float32, Nothing} = ϵ,
     a_opt::NamedTuple=(;),
     c_opt::NamedTuple=(;),
+    Vf::Union{ContinuousNetwork, Nothing} = nothing, # optional failure-probability surrogate (logit output)
+    f_opt::NamedTuple=(;),
+    failure_source::Symbol = :fail,        # :fail (per-step info[:fail]/isfailure) or :cost (Σ costₜ > limit)
+    traj_failure_mode::Symbol = :episode,  # :episode (BetaZero ref) or :suffix (paper Eq. 8; :fail only)
+    failure_cost_limit::Real = 0f0,        # cumulative cost budget for the :cost label
     log::NamedTuple=(;),
     required_columns=[],
     kwargs...)
 ```
+
+When `Vf` is supplied, an independent failure-probability head F(s) ≈ P(eventual
+failure | s) is trained by binary cross-entropy against a `:traj_failure` label
+(the ConstrainedZero chance-constraint surrogate). It is fully decoupled from the
+actor — it never enters the policy gradient — and is read back as a probability
+via [`failure_probability`](@ref). Unlike `LagrangePPO`, there is no cost critic
+or Lagrange penalty: the failure label defaults to the per-step `:fail` signal
+(`failure_source = :fail`), which the sampler fills from the env's `info[:fail]`
+or a registered `isfailure(mdp, s)` predicate (see `step_with_action!`). With
+`Vf === nothing`, `PPO` is unchanged.
 """
 function PPO(;
         π::ActorCritic,
@@ -273,6 +288,11 @@ function PPO(;
         vclip::Union{Float32, Nothing} = ϵ,
         a_opt::NamedTuple=(;),
         c_opt::NamedTuple=(;),
+        Vf::Union{ContinuousNetwork, Nothing} = nothing, # optional failure-probability surrogate (raw logit output)
+        f_opt::NamedTuple=(;),
+        failure_source::Symbol = :fail,        # plain PPO has no cost: default to the :fail per-step signal
+        traj_failure_mode::Symbol = :episode,  # :episode (BetaZero ref) or :suffix (paper Eq. 8; :fail only)
+        failure_cost_limit::Real = 0f0,        # cumulative cost budget; only used when failure_source == :cost
         log::NamedTuple=(;),
         required_columns=[],
         kwargs...)
@@ -287,12 +307,32 @@ function PPO(;
      # writes V(s) at rollout time so ppo_critic_loss can clip the update.
      extra_cols = isnothing(vclip) ? Symbol[] : Symbol[:value]
 
+     # F-head (ConstrainedZero) wiring, identical to LagrangePPO but WITHOUT the
+     # cost critic / PID machinery. Only when a Vf network is supplied do we
+     # allocate the :traj_failure column and build the failure optimizer; with
+     # Vf === nothing, PPO behaves exactly as before. The :fail source also needs
+     # the per-step :fail column, which the sampler fills from the env's
+     # info[:fail] or a registered isfailure predicate (see step_with_action!).
+     failure_cols = Symbol[]
+     if !isnothing(Vf)
+         push!(failure_cols, :traj_failure)
+         failure_source == :fail && push!(failure_cols, :fail)
+         failure_source == :cost && push!(failure_cols, :cost)
+     end
+     f_opt_tp = isnothing(Vf) ? nothing :
+                TrainingParams(;loss = ppo_failure_loss, name = "failure_", f_opt...)
+
      OnPolicySolver(;agent=PolicyParams(π),
                     𝒫=(ϵ=ϵ, λp=λp, λe=λe, vclip=vclip),
+                    Vf=Vf,
+                    f_opt=f_opt_tp,
+                    failure_source=failure_source,
+                    traj_failure_mode=traj_failure_mode,
+                    failure_cost_limit=Float32(failure_cost_limit),
                     log = LoggerParams(;dir = "log/ppo", log...),
                     a_opt = TrainingParams(;loss = ppo_loss, early_stopping = (infos) -> (infos[end][:kl] > target_kl), name = "actor_", a_opt...),
                     c_opt = TrainingParams(;loss = ppo_critic_loss, name = "critic_", c_opt...),
-                    required_columns = unique([required_columns..., :return, :logprob, :advantage, extra_cols...]),
+                    required_columns = unique([required_columns..., :return, :logprob, :advantage, extra_cols..., failure_cols...]),
                     post_sample_callback=record_avgr,
                     kwargs...)
 end
