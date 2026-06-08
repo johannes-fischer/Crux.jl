@@ -277,6 +277,16 @@ function step_with_action!(data, j::Int, sampler::Sampler, a, logprob;
             info[:fail] : extra_functions["isfailure"](sampler.mdp, sp) #TODO Changed this to "s" instead of "sp" for the continuum world
     end
 
+    # fill :id and :success from info if provided
+    if haskey(data, :id)
+        data[:id][1, j] = (!isnothing(info) && haskey(info, :id)) ?
+            info[:id] : 0
+    end
+    if haskey(data, :success)
+        data[:success][1, j] = (!isnothing(info) && haskey(info, :success)) ?
+            info[:success] : false
+    end
+
     # Cut the episode short if needed
     sampler.episode_length += 1
     if done || sampler.episode_length >= sampler.max_steps
