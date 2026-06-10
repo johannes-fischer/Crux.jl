@@ -342,8 +342,8 @@ function batched_policy_forward(samplers::AbstractVector{<:Sampler},
     end
 end
 
-# Parallel sampler: env stepping threaded via `Threads.@threads`, one batched
-# policy forward per timestep on the main thread. Per-env-contiguous layout
+# Parallel sampler: env stepping fanned out as independent `Threads.@spawn`
+# tasks, one batched policy forward per timestep on the main thread. Per-env-contiguous layout
 # (env e owns slots `(e-1)*Nsteps_per_env + 1 : e*Nsteps_per_env`) keeps each
 # env's episodes as contiguous `UnitRange{Int}`s for `fill_gae_from_arrays!`.
 # Each sampler owns its deep-copied MDP and a seeded `Xoshiro` (built in
@@ -382,12 +382,19 @@ function steps!(samplers::Vector{T}, buffer=nothing; store=nothing,
         #    return CPU results regardless of where the policy weights live,
         #    so A_batched / LP_batched are CPU here.
         A_batched, LP_batched = batched_policy_forward(samplers, rngs, explore)
-        # 2. Threaded env stepping. Each thread touches only its own sampler
-        #    and its own slot range in `data`, so no synchronization needed.
-        Threads.@threads for e in 1:N
-            slot = (e - 1) * Nsteps_per_env + j
-            step_with_action!(data, slot, samplers[e],
-                              bslice(A_batched, e:e), LP_batched[1, e]; i=i + (j-1))
+        # 2. Per-env stepping as independent tasks. Each task touches only its
+        #    own sampler and its own slot range in `data`, so no synchronization
+        #    is needed. `@spawn` (rather than `@threads`) keeps this composable:
+        #    when an outer loop runs several samplers concurrently in one process
+        #    (e.g. parallel hyperopt trials), every env-step task lands in the one
+        #    shared scheduler instead of each `@threads` region assuming it owns
+        #    the whole thread pool.
+        @sync for e in 1:N
+            Threads.@spawn begin
+                slot = (e - 1) * Nsteps_per_env + j
+                step_with_action!(data, slot, samplers[e],
+                                  bslice(A_batched, e:e), LP_batched[1, e]; i=i + (j-1))
+            end
         end
     end
 

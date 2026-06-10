@@ -55,8 +55,8 @@ Parameters specific to cost constraints (a separate value network)
 
     # Parallel sampling. num_envs=1 → existing single-env code path (unchanged
     # except for the carry-state slice-end semantics applied to both paths).
-    # num_envs>1 → deep-copy the MDP per env, run `Threads.@threads` env steps,
-    # ONE batched policy forward per timestep. ΔN must be divisible by num_envs;
+    # num_envs>1 → deep-copy the MDP per env, run per-env `Threads.@spawn` env
+    # steps, ONE batched policy forward per timestep. ΔN must be divisible by num_envs;
     # each env collects ΔN÷num_envs steps per rollout.
     num_envs::Int = 1
     # Per-env RNG strategy. `env_seed::Int` → samplers + eval get
